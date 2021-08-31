@@ -3,13 +3,12 @@
 // found in the LICENSE-BSD-3-Clause file.
 
 use crate::configuration::{self, PciBarRegionType};
-use devices::BusDevice;
 use std::any::Any;
 use std::fmt::{self, Display};
 use std::sync::{Arc, Barrier};
 use std::{self, io, result};
-use vm_memory::{GuestAddress, GuestUsize};
 use vm_allocator::SystemAllocator;
+use vm_memory::{GuestAddress, GuestUsize};
 
 #[derive(Debug)]
 pub enum Error {
@@ -46,7 +45,7 @@ pub struct BarReprogrammingParams {
     pub region_type: PciBarRegionType,
 }
 
-pub trait PciDevice: BusDevice {
+pub trait PciDevice: Send + Sync {
     /// Allocates the needed PCI BARs space using the `allocate` function which takes a size and
     /// returns an address. Returns a Vec of (GuestAddress, GuestUsize) tuples.
     fn allocate_bars(

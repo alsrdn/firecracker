@@ -19,14 +19,13 @@ use vfio_bindings::bindings::vfio::*;
 use vfio_ioctls::{VfioContainer, VfioDevice, VfioError};
 
 use vm_device::interrupt::{
-    InterruptIndex, InterruptManager, InterruptSourceGroup,
-    MsiIrqGroupConfig
+    InterruptIndex, InterruptManager, InterruptSourceGroup, MsiIrqGroupConfig,
 };
 
-use devices::BusDevice;
+use vm_allocator::SystemAllocator;
+use vm_device::{bus::MmioAddress, MutDeviceMmio};
 use vm_memory::{Address, GuestAddress, GuestUsize};
 use vmm_sys_util::eventfd::EventFd;
-use vm_allocator::SystemAllocator;
 
 pub use {
     kvm_bindings::kvm_clock_data as ClockData, kvm_bindings::kvm_create_device as CreateDevice,
@@ -244,7 +243,6 @@ impl Interrupt {
     }
 }
 
-
 #[derive(Copy, Clone)]
 pub struct MmioRegion {
     pub start: GuestAddress,
@@ -357,7 +355,7 @@ impl VfioPciDevice {
         };
 
         vfio_pci_device.parse_capabilities(msi_interrupt_manager);
-        
+
         vfio_pci_device.initialize_legacy_interrupt(legacy_interrupt_group)?;
 
         Ok(vfio_pci_device)
@@ -456,8 +454,7 @@ impl VfioPciDevice {
             }
         }
         if let Some(interrupt_source_group) = legacy_interrupt_group {
-            self.interrupt.intx = Some(
-                VfioIntx {
+            self.interrupt.intx = Some(VfioIntx {
                 interrupt_source_group,
                 enabled: false,
             });
@@ -679,7 +676,7 @@ impl VfioPciDevice {
                     prot |= libc::PROT_WRITE;
                 }
                 let (mmap_offset, mmap_size) = self.device.get_region_mmap(region.index);
-                
+
                 let offset = self.device.get_region_offset(region.index) + mmap_offset;
                 error!(
                     "VFIO region {}, offset {:x}, size {:x}",
@@ -722,7 +719,9 @@ impl VfioPciDevice {
                 );
 
                 unsafe {
-                    self.vm.lock().expect("Poisoned lock")
+                    self.vm
+                        .lock()
+                        .expect("Poisoned lock")
                         .set_user_memory_region(mem_region)
                         .map_err(|e| VfioPciError::MapRegionGuest(e.into()))?;
                 }
@@ -762,7 +761,12 @@ impl VfioPciDevice {
                     false,
                 );
 
-                if let Err(e) = unsafe { self.vm.lock().expect("Poisoned lock").set_user_memory_region(r) } {
+                if let Err(e) = unsafe {
+                    self.vm
+                        .lock()
+                        .expect("Poisoned lock")
+                        .set_user_memory_region(r)
+                } {
                     error!("Could not remove the userspace memory region: {}", e);
                 }
 
@@ -812,13 +816,13 @@ impl Drop for VfioPciDevice {
     }
 }
 
-impl BusDevice for VfioPciDevice {
-    fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
-        self.read_bar(base, offset, data);
+impl MutDeviceMmio for VfioPciDevice {
+    fn mmio_read(&mut self, base: MmioAddress, offset: u64, data: &mut [u8]) {
+        self.read_bar(base.0, offset, data);
     }
 
-    fn write(&mut self, base: u64, offset: u64, data: &[u8]) {
-        self.write_bar(base, offset, data);
+    fn mmio_write(&mut self, base: MmioAddress, offset: u64, data: &[u8]) {
+        self.write_bar(base.0, offset, data);
     }
 }
 
@@ -1006,7 +1010,6 @@ impl PciDevice for VfioPciDevice {
                 host_addr: None,
                 mmap_size: None,
             });
-        
 
             bar_id += 1;
             if is_64bit_bar {
@@ -1197,9 +1200,12 @@ impl PciDevice for VfioPciDevice {
                             false,
                         );
 
-                        unsafe { self.vm.lock().expect("Poisoned lock")
-                            .set_user_memory_region(old_mem_region)
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                        unsafe {
+                            self.vm
+                                .lock()
+                                .expect("Poisoned lock")
+                                .set_user_memory_region(old_mem_region)
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                         }
 
                         // Insert new region
@@ -1212,9 +1218,12 @@ impl PciDevice for VfioPciDevice {
                             false,
                         );
 
-                        unsafe { self.vm.lock().expect("Poisoned lock")
-                            .set_user_memory_region(new_mem_region)
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                        unsafe {
+                            self.vm
+                                .lock()
+                                .expect("Poisoned lock")
+                                .set_user_memory_region(new_mem_region)
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                         }
                     }
                 }

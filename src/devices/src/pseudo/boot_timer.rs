@@ -1,7 +1,8 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::bus::BusDevice;
+use vm_device::{bus::MmioAddress, MutDeviceMmio};
+
 use logger::info;
 use utils::time::TimestampUs;
 
@@ -12,8 +13,9 @@ pub struct BootTimer {
     start_ts: TimestampUs,
 }
 
-impl BusDevice for BootTimer {
-    fn write(&mut self, _: u64, offset: u64, data: &[u8]) {
+impl crate::MmioDevice for BootTimer {}
+impl MutDeviceMmio for BootTimer {
+    fn mmio_write(&mut self, _: MmioAddress, offset: u64, data: &[u8]) {
         // Only handle byte length instructions at a zero offset.
         if data.len() != 1 || offset != 0 {
             return;
@@ -33,6 +35,8 @@ impl BusDevice for BootTimer {
             );
         }
     }
+
+    fn mmio_read(&mut self, _: MmioAddress, _: u64, _: &mut [u8]) {}
 }
 
 impl BootTimer {

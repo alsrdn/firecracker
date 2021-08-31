@@ -5,15 +5,16 @@
 
 // use devices::interrupt_controller::InterruptController;
 // use hypervisor::IrqRoutingEntry;
+use kvm_ioctls::VmFd;
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use vm_allocator::SystemAllocator;
 use vm_device::interrupt::{
-    InterruptIndex, InterruptManager, InterruptSourceConfig, InterruptSourceGroup, MsiIrqGroupConfig,
+    InterruptIndex, InterruptManager, InterruptSourceConfig, InterruptSourceGroup,
+    MsiIrqGroupConfig,
 };
-use kvm_ioctls::{VmFd};
 
 use utils::eventfd::EventFd;
 
@@ -101,7 +102,7 @@ use kvm_bindings::KVM_IRQCHIP_IOAPIC;
 impl MsiInterruptGroup<IrqRoutingEntry> {
     fn set_gsi_routes(&self, routes: &HashMap<u32, RoutingEntry<IrqRoutingEntry>>) -> Result<()> {
         let mut entry_vec: Vec<IrqRoutingEntry> = Vec::new();
-        
+
         for i in 0..24 {
             let mut kvm_route = kvm_irq_routing_entry {
                 gsi: i,
@@ -111,7 +112,7 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
 
             kvm_route.u.irqchip.irqchip = KVM_IRQCHIP_IOAPIC;
             kvm_route.u.irqchip.pin = i;
-            
+
             entry_vec.push(kvm_route);
         }
 
@@ -121,7 +122,6 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
             }
             entry_vec.push(entry.route);
         }
-
 
         let mut irq_routing =
             vec_with_array_field::<kvm_irq_routing, kvm_irq_routing_entry>(entry_vec.len());
@@ -134,12 +134,16 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
             entries_slice.copy_from_slice(&entry_vec);
         }
 
-        self.vm.lock().expect("Poisoned VmFd lock").set_gsi_routing(&irq_routing[0]).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed setting GSI routing: {}", e),
-            )
-        })
+        self.vm
+            .lock()
+            .expect("Poisoned VmFd lock")
+            .set_gsi_routing(&irq_routing[0])
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed setting GSI routing: {}", e),
+                )
+            })
     }
 }
 
@@ -306,10 +310,7 @@ type KvmRoutingEntry = RoutingEntry<kvm_irq_routing_entry>;
 pub type KvmMsiInterruptManager = MsiInterruptManager<kvm_irq_routing_entry>;
 
 impl KvmRoutingEntry {
-    pub fn make_entry(
-        gsi: u32,
-        config: &InterruptSourceConfig,
-    ) -> Result<Box<Self>> {
+    pub fn make_entry(gsi: u32, config: &InterruptSourceConfig) -> Result<Box<Self>> {
         if let InterruptSourceConfig::MsiIrq(cfg) = &config {
             let mut kvm_route = kvm_irq_routing_entry {
                 gsi,

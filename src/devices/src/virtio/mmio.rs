@@ -14,7 +14,7 @@ use vm_memory::{GuestAddress, GuestMemoryMmap};
 
 use super::device_status;
 use super::*;
-use crate::bus::BusDevice;
+use vm_device::{bus::MmioAddress, MutDeviceMmio};
 
 //TODO crosvm uses 0 here, but IIRC virtio specified some other vendor id that should be used
 const VENDOR_ID: u32 = 0;
@@ -212,8 +212,8 @@ impl MmioTransport {
     }
 }
 
-impl BusDevice for MmioTransport {
-    fn read(&mut self, _: u64, offset: u64, data: &mut [u8]) {
+impl MutDeviceMmio for MmioTransport {
+    fn mmio_read(&mut self, _: MmioAddress, offset: u64, data: &mut [u8]) {
         match offset {
             0x00..=0xff if data.len() == 4 => {
                 let v = match offset {
@@ -253,7 +253,7 @@ impl BusDevice for MmioTransport {
         };
     }
 
-    fn write(&mut self, _: u64, offset: u64, data: &[u8]) {
+    fn mmio_write(&mut self, _: MmioAddress, offset: u64, data: &[u8]) {
         fn hi(v: &mut GuestAddress, x: u32) {
             *v = (*v & 0xffff_ffff) | (u64::from(x) << 32)
         }
@@ -319,7 +319,9 @@ impl BusDevice for MmioTransport {
             }
         }
     }
+}
 
+impl crate::MmioDevice for MmioTransport {
     fn interrupt(&self, irq_mask: u32) -> std::io::Result<()> {
         self.interrupt_status
             .fetch_or(irq_mask as usize, Ordering::SeqCst);

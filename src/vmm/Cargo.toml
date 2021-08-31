@@ -29,7 +29,7 @@ utils = { path = "../utils" }
 pci = { path = "../pci"}
 vfio-ioctls = { git = "https://github.com/rust-vmm/vfio-ioctls", branch = "master" }
 vm-allocator = { path = "../vm-allocator"}
-vm-device = { path = "../vm-device"}
+vm-device = { git = "https://github.com/sandreim/vm-device", branch = "master"}
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 cpuid = { path = "../cpuid" }

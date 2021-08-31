@@ -13,6 +13,7 @@
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
+mod interrupt;
 pub mod memory_snapshot;
 /// Save/restore utilities.
 pub mod persist;
@@ -31,7 +32,6 @@ pub mod version_map;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 mod vstate;
-mod interrupt;
 
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -55,11 +55,11 @@ use crate::vstate::{
 use arch::DeviceType;
 use devices::virtio::balloon::Error as BalloonError;
 use devices::virtio::{
-    Balloon, BalloonConfig, BalloonStats, Block, MmioTransport, Net, BALLOON_DEV_ID, TYPE_BALLOON,
-    TYPE_BLOCK, TYPE_NET,
+    Balloon, BalloonConfig, BalloonStats, Block, Net, BALLOON_DEV_ID, TYPE_BALLOON, TYPE_BLOCK,
+    TYPE_NET,
 };
-use devices::BusDevice;
 use event_manager::{EventManager as BaseEventManager, EventOps, Events, MutEventSubscriber};
+use kvm_bindings::{kvm_irq_routing, kvm_irq_routing_entry as IrqRoutingEntry};
 use logger::{error, info, warn, LoggerError, MetricsError, METRICS};
 use rate_limiter::BucketUpdate;
 use seccompiler::BpfProgram;
@@ -67,7 +67,6 @@ use snapshot::Persist;
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
 use vm_memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
-use kvm_bindings::{kvm_irq_routing, kvm_irq_routing_entry as IrqRoutingEntry};
 
 /// Shorthand type for the EventManager flavour used by Firecracker.
 pub type EventManager = BaseEventManager<Arc<Mutex<dyn MutEventSubscriber>>>;
@@ -207,7 +206,7 @@ impl Display for Error {
             ),
             VmmObserverTeardown(e) => {
                 write!(f, "Error thrown by observer object on Vmm teardown: {}", e)
-            },
+            }
         }
     }
 }
@@ -234,6 +233,13 @@ pub type DirtyBitmap = HashMap<usize, Vec<u64>>;
 pub(crate) fn mem_size_mib(guest_memory: &GuestMemoryMmap) -> u64 {
     guest_memory.map_and_fold(0, |(_, region)| region.len(), |a, b| a + b) >> 20
 }
+
+/// Firecracker Mmio bus definition.
+pub type MmioBus =
+    vm_device::bus::Bus<vm_device::bus::MmioAddress, Arc<Mutex<dyn devices::MmioDevice>>>;
+/// Firecracker PIO bus definition.
+pub type PioBus =
+    vm_device::bus::Bus<vm_device::bus::PioAddress, Arc<Mutex<dyn devices::PioDevice>>>;
 
 /// Contains the state and associated methods required for the Firecracker VMM.
 pub struct Vmm {
@@ -270,7 +276,7 @@ impl Vmm {
         &self,
         device_type: DeviceType,
         device_id: &str,
-    ) -> Option<&Mutex<dyn BusDevice>> {
+    ) -> Option<Arc<Mutex<dyn devices::MmioDevice>>> {
         self.mmio_device_manager.get_device(device_type, device_id)
     }
 
@@ -555,58 +561,20 @@ impl Vmm {
 
     /// Returns a reference to the balloon device if present.
     pub fn balloon_config(&self) -> std::result::Result<BalloonConfig, BalloonError> {
-        if let Some(busdev) = self.get_bus_device(DeviceType::Virtio(TYPE_BALLOON), BALLOON_DEV_ID)
-        {
-            let virtio_device = busdev
-                .lock()
-                .expect("Poisoned lock")
-                .as_any()
-                .downcast_ref::<MmioTransport>()
-                // Only MmioTransport implements BusDevice at this point.
-                .expect("Unexpected BusDevice type")
-                .device();
-
-            let config = virtio_device
-                .lock()
-                .expect("Poisoned lock")
-                .as_mut_any()
-                .downcast_mut::<Balloon>()
-                .unwrap()
-                .config();
-
-            Ok(config)
-        } else {
-            Err(BalloonError::DeviceNotFound)
-        }
+        self.mmio_device_manager
+            .with_virtio_device_with_id(TYPE_BALLOON, BALLOON_DEV_ID, |balloon: &mut Balloon| {
+                Ok(balloon.config())
+            })
+            .map_err(|_| BalloonError::DeviceNotFound)
     }
 
     /// Returns the latest balloon statistics if they are enabled.
     pub fn latest_balloon_stats(&self) -> std::result::Result<BalloonStats, BalloonError> {
-        if let Some(busdev) = self.get_bus_device(DeviceType::Virtio(TYPE_BALLOON), BALLOON_DEV_ID)
-        {
-            let virtio_device = busdev
-                .lock()
-                .expect("Poisoned lock")
-                .as_any()
-                .downcast_ref::<MmioTransport>()
-                // Only MmioTransport implements BusDevice at this point.
-                .expect("Unexpected BusDevice type")
-                .device();
-
-            let latest_stats = virtio_device
-                .lock()
-                .expect("Poisoned lock")
-                .as_mut_any()
-                .downcast_mut::<Balloon>()
-                .unwrap()
-                .latest_stats()
-                .ok_or(BalloonError::StatisticsDisabled)
-                .map(|stats| stats.clone())?;
-
-            Ok(latest_stats)
-        } else {
-            Err(BalloonError::DeviceNotFound)
-        }
+        self.mmio_device_manager
+            .with_virtio_device_with_id(TYPE_BALLOON, BALLOON_DEV_ID, |balloon: &mut Balloon| {
+                Ok(balloon.latest_stats().unwrap().clone())
+            })
+            .map_err(|_| BalloonError::DeviceNotFound)
     }
 
     /// Updates configuration for the balloon device target size.
@@ -620,34 +588,14 @@ impl Vmm {
             return Err(BalloonError::TooManyPagesRequested);
         }
 
-        if let Some(busdev) = self.get_bus_device(DeviceType::Virtio(TYPE_BALLOON), BALLOON_DEV_ID)
-        {
-            {
-                let virtio_device = busdev
-                    .lock()
-                    .expect("Poisoned lock")
-                    .as_any()
-                    .downcast_ref::<MmioTransport>()
-                    // Only MmioTransport implements BusDevice at this point.
-                    .expect("Unexpected BusDevice type")
-                    .device();
-
-                virtio_device
-                    .lock()
-                    .expect("Poisoned lock")
-                    .as_mut_any()
-                    .downcast_mut::<Balloon>()
-                    .unwrap()
-                    .update_size(amount_mib)?;
-            }
-
-            let locked_dev = busdev.lock().expect("Poisoned lock");
-            locked_dev
-                .interrupt(devices::virtio::VIRTIO_MMIO_INT_CONFIG)
-                .map_err(BalloonError::InterruptError)
-        } else {
-            Err(BalloonError::DeviceNotFound)
-        }
+        self.mmio_device_manager
+            .with_virtio_device_with_id(TYPE_BALLOON, BALLOON_DEV_ID, |balloon: &mut Balloon| {
+                balloon
+                    .update_size(amount_mib)
+                    .map_err(|_| "Unable to update size")?;
+                Ok(())
+            })
+            .map_err(|_| BalloonError::DeviceNotFound)
     }
 
     /// Updates configuration for the balloon device as described in `balloon_stats_update`.
@@ -655,30 +603,14 @@ impl Vmm {
         &mut self,
         stats_polling_interval_s: u16,
     ) -> std::result::Result<(), BalloonError> {
-        if let Some(busdev) = self.get_bus_device(DeviceType::Virtio(TYPE_BALLOON), BALLOON_DEV_ID)
-        {
-            {
-                let virtio_device = busdev
-                    .lock()
-                    .expect("Poisoned lock")
-                    .as_any()
-                    .downcast_ref::<MmioTransport>()
-                    // Only MmioTransport implements BusDevice at this point.
-                    .expect("Unexpected BusDevice type")
-                    .device();
-
-                virtio_device
-                    .lock()
-                    .expect("Poisoned lock")
-                    .as_mut_any()
-                    .downcast_mut::<Balloon>()
-                    .unwrap()
-                    .update_stats_polling_interval(stats_polling_interval_s)?;
-            }
-            Ok(())
-        } else {
-            Err(BalloonError::DeviceNotFound)
-        }
+        self.mmio_device_manager
+            .with_virtio_device_with_id(TYPE_BALLOON, BALLOON_DEV_ID, |balloon: &mut Balloon| {
+                balloon
+                    .update_stats_polling_interval(stats_polling_interval_s)
+                    .map_err(|_| "Unable to update polling interval")?;
+                Ok(())
+            })
+            .map_err(|_| BalloonError::DeviceNotFound)
     }
 
     /// Signals Vmm to stop and exit.
@@ -756,7 +688,6 @@ pub fn vec_with_array_field<T: Default, F>(count: usize) -> Vec<T> {
     let vec_size_bytes = size_of::<T>() + element_space;
     vec_with_size_in_bytes(vec_size_bytes)
 }
-
 
 /// Process the content of the MPIDR_EL1 register in order to be able to pass it to KVM
 ///

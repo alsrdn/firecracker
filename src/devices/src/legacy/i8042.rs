@@ -11,7 +11,7 @@ use std::num::Wrapping;
 use std::{io, result};
 use utils::eventfd::EventFd;
 
-use crate::bus::BusDevice;
+use vm_device::{bus::PioAddress, MutDevicePio};
 
 #[derive(Debug)]
 pub enum Error {
@@ -44,10 +44,10 @@ impl fmt::Display for Error {
 type Result<T> = result::Result<T, Error>;
 
 /// Offset of the status port (port 0x64)
-const OFS_STATUS: u64 = 4;
+const OFS_STATUS: u16 = 4;
 
 /// Offset of the data port (port 0x60)
-const OFS_DATA: u64 = 0;
+const OFS_DATA: u16 = 0;
 
 /// i8042 commands
 /// These values are written by the guest driver to port 0x64.
@@ -197,8 +197,9 @@ impl I8042Device {
     }
 }
 
-impl BusDevice for I8042Device {
-    fn read(&mut self, _: u64, offset: u64, data: &mut [u8]) {
+impl crate::PioDevice for I8042Device {}
+impl MutDevicePio for I8042Device {
+    fn pio_read(&mut self, _: PioAddress, offset: u16, data: &mut [u8]) {
         // All our ports are byte-wide. We don't know how to handle any wider data.
         if data.len() != 1 {
             METRICS.i8042.missed_read_count.inc();
@@ -232,7 +233,7 @@ impl BusDevice for I8042Device {
         }
     }
 
-    fn write(&mut self, _: u64, offset: u64, data: &[u8]) {
+    fn pio_write(&mut self, _: PioAddress, offset: u16, data: &[u8]) {
         // All our ports are byte-wide. We don't know how to handle any wider data.
         if data.len() != 1 {
             METRICS.i8042.missed_write_count.inc();

@@ -9,13 +9,13 @@ use crate::vmm_config::balloon::*;
 use crate::vmm_config::boot_source::{
     BootConfig, BootSourceConfig, BootSourceConfigError, DEFAULT_KERNEL_CMDLINE,
 };
+use crate::vmm_config::device::VfioDeviceConfig;
 use crate::vmm_config::drive::*;
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::logger::{init_logger, LoggerConfig, LoggerConfigError};
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError, DEFAULT_MEM_SIZE_MIB};
 use crate::vmm_config::metrics::{init_metrics, MetricsConfig, MetricsConfigError};
 use crate::vmm_config::mmds::{MmdsConfig, MmdsConfigError};
-use crate::vmm_config::device::VfioDeviceConfig;
 use crate::vmm_config::net::*;
 use crate::vmm_config::vsock::*;
 use crate::vstate::vcpu::VcpuConfig;
@@ -333,7 +333,7 @@ impl VmResources {
     }
 
     /// Set the vfio device configuration.
-    pub fn set_vfio_device_config(&mut self, config: VfioDeviceConfig) { 
+    pub fn set_vfio_device_config(&mut self, config: VfioDeviceConfig) {
         self.vfio_device_config = Some(config);
     }
 

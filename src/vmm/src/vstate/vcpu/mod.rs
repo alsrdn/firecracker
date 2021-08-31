@@ -228,7 +228,7 @@ impl Vcpu {
     }
 
     /// Sets a MMIO bus for this vcpu.
-    pub fn set_mmio_bus(&mut self, mmio_bus: devices::Bus) {
+    pub fn set_mmio_bus(&mut self, mmio_bus: crate::MmioBus) {
         self.kvm_vcpu.mmio_bus = Some(mmio_bus);
     }
 
@@ -457,18 +457,38 @@ impl Vcpu {
             Ok(run) => match run {
                 VcpuExit::MmioRead(addr, data) => {
                     if let Some(mmio_bus) = &self.kvm_vcpu.mmio_bus {
-                        if !(mmio_bus.read(addr, data)) {
-                            error!("Unhandled mmio read at {:x}", addr);
+                        match mmio_bus
+                            .check_access(vm_device::bus::MmioAddress(addr), data.len())
+                            .map(|(range, device)| {
+                                device.lock().expect("damn").mmio_read(
+                                    range.base(),
+                                    addr - range.base().0,
+                                    data,
+                                )
+                            }) {
+                            Ok(_) => {}
+                            Err(e) => error!("MMIO read error {:?} at @{}", e, addr),
                         }
+
                         METRICS.vcpu.exit_mmio_read.inc();
                     }
                     Ok(VcpuEmulation::Handled)
                 }
                 VcpuExit::MmioWrite(addr, data) => {
                     if let Some(mmio_bus) = &self.kvm_vcpu.mmio_bus {
-                        if !mmio_bus.write(addr, data) {
-                            error!("Unhandled mmio write at {:x}", addr);
+                        match mmio_bus
+                            .check_access(vm_device::bus::MmioAddress(addr), data.len())
+                            .map(|(range, device)| {
+                                device.lock().expect("damn").mmio_write(
+                                    range.base(),
+                                    addr - range.base().0,
+                                    data,
+                                )
+                            }) {
+                            Ok(_) => {}
+                            Err(e) => error!("MMIO write error {:?} at @{}", e, addr),
                         }
+
                         METRICS.vcpu.exit_mmio_write.inc();
                     }
                     Ok(VcpuEmulation::Handled)

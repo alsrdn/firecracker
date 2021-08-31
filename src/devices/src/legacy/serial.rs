@@ -15,7 +15,10 @@ use logger::{error, warn, IncMetric, METRICS};
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
 
-use crate::bus::BusDevice;
+use vm_device::{
+    bus::{MmioAddress, PioAddress},
+    MutDeviceMmio, MutDevicePio,
+};
 
 const FIFO_SIZE: usize = 64;
 
@@ -355,9 +358,11 @@ impl Serial {
         };
     }
 }
+impl crate::PioDevice for Serial {}
+impl crate::MmioDevice for Serial {}
 
-impl BusDevice for Serial {
-    fn read(&mut self, _: u64, offset: u64, data: &mut [u8]) {
+impl MutDevicePio for Serial {
+    fn pio_read(&mut self, _: PioAddress, offset: u16, data: &mut [u8]) {
         if data.len() != 1 {
             METRICS.uart.missed_read_count.inc();
             return;
@@ -366,7 +371,41 @@ impl BusDevice for Serial {
         data[0] = self.handle_read(offset as u8);
     }
 
-    fn write(&mut self, _: u64, offset: u64, data: &[u8]) {
+    fn pio_write(&mut self, _: PioAddress, offset: u16, data: &[u8]) {
+        if data.len() != 1 {
+            METRICS.uart.missed_write_count.inc();
+            return;
+        }
+        if let Err(e) = self.handle_write(offset as u8, data[0]) {
+            // If the error kind is `WouldBlock`, we also want to trigger an interrupt,
+            // in order to not block the output of the serial device.
+            if e.kind() == io::ErrorKind::WouldBlock {
+                // Sending the interrupt may also fail.
+                if let Err(interrupt_err) = self.thr_empty_interrupt() {
+                    error!("Failed the raise serial IRQ: {}", interrupt_err);
+                    // Counter incremented for irq error.
+                    METRICS.uart.error_count.inc();
+                }
+            }
+
+            // Counter incremented for any handle_write() error.
+            error!("Failed the write to serial: {}", e);
+            METRICS.uart.error_count.inc();
+        }
+    }
+}
+
+impl MutDeviceMmio for Serial {
+    fn mmio_read(&mut self, _: MmioAddress, offset: u64, data: &mut [u8]) {
+        if data.len() != 1 {
+            METRICS.uart.missed_read_count.inc();
+            return;
+        }
+
+        data[0] = self.handle_read(offset as u8);
+    }
+
+    fn mmio_write(&mut self, _: MmioAddress, offset: u64, data: &[u8]) {
         if data.len() != 1 {
             METRICS.uart.missed_write_count.inc();
             return;

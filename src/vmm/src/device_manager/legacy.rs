@@ -9,15 +9,15 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use devices::BusDevice;
 use kvm_ioctls::VmFd;
 use utils::eventfd::EventFd;
+use vm_device::{bus::Bus, bus::PioAddress, bus::PioRange};
 
 /// Errors corresponding to the `PortIODeviceManager`.
 #[derive(Debug)]
 pub enum Error {
     /// Cannot add legacy device to Bus.
-    BusError(devices::BusError),
+    BusError(vm_device::bus::Error),
     /// Cannot create EventFd.
     EventFd(std::io::Error),
 }
@@ -39,10 +39,10 @@ type Result<T> = ::std::result::Result<T, Error>;
 /// on an I/O Bus. It currently manages the uart and i8042 devices.
 /// The `LegacyDeviceManger` should be initialized only by using the constructor.
 pub struct PortIODeviceManager {
-    pub io_bus: devices::Bus,
+    pub io_bus: crate::PioBus,
     pub stdio_serial: Arc<Mutex<devices::legacy::Serial>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
-    pub pci_bus: Arc<Mutex<dyn BusDevice>>,
+    pub pci_bus: Arc<Mutex<dyn devices::PioDevice>>,
 
     pub com_evt_1_3: EventFd,
     pub com_evt_2_4: EventFd,
@@ -54,9 +54,9 @@ impl PortIODeviceManager {
     pub fn new(
         serial: Arc<Mutex<devices::legacy::Serial>>,
         i8042_reset_evfd: EventFd,
-        pci_bus: Arc<Mutex<dyn BusDevice>>,
+        pci_bus: Arc<Mutex<dyn devices::PioDevice>>,
     ) -> Result<Self> {
-        let io_bus = devices::Bus::new();
+        let io_bus = Bus::new();
         let com_evt_1_3 = serial
             .lock()
             .expect("Poisoned lock")
@@ -85,41 +85,51 @@ impl PortIODeviceManager {
     /// Register supported legacy devices.
     pub fn register_devices(&mut self, vm_fd: &VmFd) -> Result<()> {
         self.io_bus
-            .insert(Arc::clone(&self.pci_bus), 0xcf8, 0x8)
+            .register(
+                PioRange::new(PioAddress(0xcf8), 0x8).unwrap(),
+                Arc::clone(&self.pci_bus),
+            )
             .map_err(Error::BusError)?;
 
         self.io_bus
-            .insert(self.stdio_serial.clone(), 0x3f8, 0x8)
+            .register(
+                PioRange::new(PioAddress(0x3f8), 0x8).unwrap(),
+                self.stdio_serial.clone() as Arc<Mutex<(dyn devices::PioDevice)>>,
+            )
             .map_err(Error::BusError)?;
+
         self.io_bus
-            .insert(
+            .register(
+                PioRange::new(PioAddress(0x2f8), 0x8).unwrap(),
                 Arc::new(Mutex::new(devices::legacy::Serial::new_sink(
                     self.com_evt_2_4.try_clone().map_err(Error::EventFd)?,
                 ))),
-                0x2f8,
-                0x8,
             )
             .map_err(Error::BusError)?;
+
         self.io_bus
-            .insert(
+            .register(
+                PioRange::new(PioAddress(0x3e8), 0x8).unwrap(),
                 Arc::new(Mutex::new(devices::legacy::Serial::new_sink(
                     self.com_evt_1_3.try_clone().map_err(Error::EventFd)?,
                 ))),
-                0x3e8,
-                0x8,
             )
             .map_err(Error::BusError)?;
+
         self.io_bus
-            .insert(
+            .register(
+                PioRange::new(PioAddress(0x2e8), 0x8).unwrap(),
                 Arc::new(Mutex::new(devices::legacy::Serial::new_sink(
                     self.com_evt_2_4.try_clone().map_err(Error::EventFd)?,
                 ))),
-                0x2e8,
-                0x8,
             )
             .map_err(Error::BusError)?;
+
         self.io_bus
-            .insert(self.i8042.clone(), 0x060, 0x5)
+            .register(
+                PioRange::new(PioAddress(0x060), 0x5).unwrap(),
+                self.i8042.clone(),
+            )
             .map_err(Error::BusError)?;
 
         vm_fd

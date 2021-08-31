@@ -5,8 +5,6 @@ use std::{convert::TryInto, sync::Arc};
 
 use logger::{warn, IncMetric, RTCDeviceMetrics, METRICS};
 
-use crate::BusDevice;
-
 pub type RTCDevice = vm_superio::RTC<Arc<RTCDeviceMetrics>>;
 
 // Implements Bus functions for AMBA PL031 RTC device

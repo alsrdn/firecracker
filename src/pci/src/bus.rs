@@ -2,16 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
-use crate::configuration::{
-    PciBarRegionType, PciBridgeSubclass, PciClassCode, PciConfiguration, PciHeaderType,
-};
-use crate::device::{PciDevice};
+use crate::configuration::{PciBridgeSubclass, PciClassCode, PciConfiguration, PciHeaderType};
+use crate::device::PciDevice;
 use byteorder::{ByteOrder, LittleEndian};
-use devices::{Bus, BusDevice};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Barrier, Mutex};
-use vm_memory::{Address, GuestAddress, GuestUsize};
+use vm_device::{bus::MmioAddress, bus::PioAddress, MutDeviceMmio, MutDevicePio};
 
 const VENDOR_ID_INTEL: u16 = 0x8086;
 const DEVICE_ID_INTEL_VIRT_PCIE_HOST: u16 = 0x0d57;
@@ -61,8 +58,6 @@ impl PciRoot {
     }
 }
 
-impl BusDevice for PciRoot {}
-
 impl PciDevice for PciRoot {
     fn write_config_register(
         &mut self,
@@ -102,32 +97,6 @@ impl PciBus {
             devices,
             device_ids,
         }
-    }
-
-    pub fn register_mapping(
-        &self,
-        dev: Arc<Mutex<dyn BusDevice>>,
-        io_bus: &mut Bus,
-        mmio_bus: &mut Bus,
-        bars: Vec<(GuestAddress, GuestUsize, PciBarRegionType)>,
-    ) -> Result<()> {
-        for (address, size, type_) in bars {
-            match type_ {
-                PciBarRegionType::IoRegion => {
-                    io_bus
-                        .insert(dev.clone(), address.raw_value(), size)
-                        .unwrap();
-                    error!("cannot register bus mappings {:x} {:x} IO", address.0, size);
-                }
-                PciBarRegionType::Memory32BitRegion | PciBarRegionType::Memory64BitRegion => {
-                    error!("Registering bus mappings {:x} {:x}", address.0, size);
-                    mmio_bus
-                        .insert(dev.clone(), address.raw_value(), size)
-                        .unwrap();
-                }
-            }
-        }
-        Ok(())
     }
 
     pub fn add_device(
@@ -293,8 +262,8 @@ impl PciConfigIo {
     }
 }
 
-impl BusDevice for PciConfigIo {
-    fn read(&mut self, _: u64, offset: u64, data: &mut [u8]) {
+impl MutDevicePio for PciConfigIo {
+    fn pio_read(&mut self, _: PioAddress, offset: u16, data: &mut [u8]) {
         // `offset` is relative to 0xcf8
         let value = match offset {
             0..=3 => self.config_address,
@@ -316,14 +285,14 @@ impl BusDevice for PciConfigIo {
         }
     }
 
-    fn write(&mut self, _: u64, offset: u64, data: &[u8]) {
+    fn pio_write(&mut self, _: PioAddress, offset: u16, data: &[u8]) {
         // `offset` is relative to 0xcf8
         match offset {
             o @ 0..=3 => {
-                self.set_config_address(o, data);
+                self.set_config_address(o.into(), data);
             }
             o @ 4..=7 => {
-                self.config_space_write(o - 4, data);
+                self.config_space_write((o - 4).into(), data);
             }
             _ => {}
         }
@@ -399,8 +368,8 @@ impl PciConfigMmio {
     }
 }
 
-impl BusDevice for PciConfigMmio {
-    fn read(&mut self, _: u64, offset: u64, data: &mut [u8]) {
+impl MutDeviceMmio for PciConfigMmio {
+    fn mmio_read(&mut self, _: MmioAddress, offset: u64, data: &mut [u8]) {
         // Only allow reads to the register boundary.
         let start = offset as usize % 4;
         let end = start + data.len();
@@ -417,7 +386,7 @@ impl BusDevice for PciConfigMmio {
         }
     }
 
-    fn write(&mut self, _: u64, offset: u64, data: &[u8]) {
+    fn mmio_write(&mut self, _: MmioAddress, offset: u64, data: &[u8]) {
         if offset > u64::from(u32::max_value()) {
             return;
         }

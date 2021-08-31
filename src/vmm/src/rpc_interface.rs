@@ -18,6 +18,7 @@ use crate::vmm_config::balloon::{
     BalloonUpdateStatsConfig,
 };
 use crate::vmm_config::boot_source::{BootSourceConfig, BootSourceConfigError};
+use crate::vmm_config::device::VfioDeviceConfig;
 use crate::vmm_config::drive::{BlockDeviceConfig, BlockDeviceUpdateConfig, DriveError};
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::logger::{LoggerConfig, LoggerConfigError};
@@ -30,7 +31,6 @@ use crate::vmm_config::net::{
 use crate::vmm_config::snapshot::{CreateSnapshotParams, LoadSnapshotParams, SnapshotType};
 use crate::vmm_config::vsock::{VsockConfigError, VsockDeviceConfig};
 use crate::vmm_config::{self, RateLimiterUpdate};
-use crate::vmm_config::device::VfioDeviceConfig;
 
 use crate::{builder::StartMicrovmError, EventManager};
 use crate::{ExitCode, FC_EXIT_CODE_BAD_CONFIGURATION};
@@ -338,7 +338,10 @@ impl<'a> PrebootApiController<'a> {
             #[cfg(target_arch = "x86_64")]
             SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(target_arch = "x86_64")]
-            SetVfioDevice(device) => { self.set_vfio_device(device); Ok(VmmData::Empty)}
+            SetVfioDevice(device) => {
+                self.set_vfio_device(device);
+                Ok(VmmData::Empty)
+            }
         }
     }
 

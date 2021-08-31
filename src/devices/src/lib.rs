@@ -8,12 +8,12 @@
 //! Emulates virtual and hardware devices.
 use std::io;
 
-mod bus;
+mod busdevice;
 pub mod legacy;
 pub mod pseudo;
 pub mod virtio;
 
-pub use self::bus::{Bus, BusDevice, Error as BusError};
+pub use self::busdevice::{MmioDevice, PioDevice};
 use crate::virtio::{QueueError, VsockError};
 use logger::{error, IncMetric, METRICS};
 

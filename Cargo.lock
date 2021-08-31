@@ -299,6 +299,7 @@ dependencies = [
  "logger",
  "mmds",
  "net_gen",
+ "pci",
  "proptest",
  "rate_limiter",
  "serde",
@@ -308,6 +309,7 @@ dependencies = [
  "versionize",
  "versionize_derive",
  "virtio_gen",
+ "vm-device",
  "vm-memory 0.1.0",
  "vm-superio",
 ]
@@ -563,9 +565,7 @@ name = "pci"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arch",
  "byteorder",
- "devices",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
@@ -932,26 +932,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "thiserror"
-version = "1.0.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa6f76457f59514c7eeb4e59d891395fab0b2fd1d40723ae737d64153392e9c6"
-dependencies = [
- "thiserror-impl",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a36768c0fbf1bb15eca10defa29526bda730a2376c2ab4393ccfa16fb1a318d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "thread_local"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1069,14 +1049,8 @@ dependencies = [
 [[package]]
 name = "vm-device"
 version = "0.1.0"
+source = "git+https://github.com/sandreim/vm-device?branch=master#734f899ef875d3d379fc9d410b41bb51b95fdf6d"
 dependencies = [
- "anyhow",
- "serde",
- "serde_derive",
- "serde_json",
- "thiserror",
- "vfio-ioctls",
- "vm-memory 0.4.0",
  "vmm-sys-util",
 ]
 

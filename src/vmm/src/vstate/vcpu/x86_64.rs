@@ -158,8 +158,8 @@ pub struct KvmVcpu {
     pub index: u8,
     pub fd: VcpuFd,
 
-    pub pio_bus: Option<devices::Bus>,
-    pub mmio_bus: Option<devices::Bus>,
+    pub pio_bus: Option<crate::PioBus>,
+    pub mmio_bus: Option<crate::MmioBus>,
 
     msr_list: MsrList,
 }
@@ -233,7 +233,7 @@ impl KvmVcpu {
     }
 
     /// Sets a Port Mapped IO bus for this vcpu.
-    pub fn set_pio_bus(&mut self, pio_bus: devices::Bus) {
+    pub fn set_pio_bus(&mut self, pio_bus: crate::PioBus) {
         self.pio_bus = Some(pio_bus);
     }
 
@@ -398,8 +398,17 @@ impl KvmVcpu {
         match exit {
             VcpuExit::IoIn(addr, data) => {
                 if let Some(pio_bus) = &self.pio_bus {
-                    if !pio_bus.read(u64::from(addr), data) {
-                        error!("Unhandled PIO read {:x}", addr);
+                    match pio_bus
+                        .check_access(vm_device::bus::PioAddress(addr), data.len())
+                        .map(|(range, device)| {
+                            device.lock().expect("damn").pio_read(
+                                range.base(),
+                                addr - range.base().0,
+                                data,
+                            )
+                        }) {
+                        Ok(_) => {}
+                        Err(e) => error!("PIO read error {:?} at @{}", e, addr),
                     }
                     METRICS.vcpu.exit_io_in.inc();
                 }
@@ -407,10 +416,19 @@ impl KvmVcpu {
             }
             VcpuExit::IoOut(addr, data) => {
                 if let Some(pio_bus) = &self.pio_bus {
-                    if !(pio_bus.write(u64::from(addr), data)) {
-                        error!("Unhandled PIO write {:x}", addr);
+                    match pio_bus
+                        .check_access(vm_device::bus::PioAddress(addr), data.len())
+                        .map(|(range, device)| {
+                            device.lock().expect("damn").pio_write(
+                                range.base(),
+                                addr - range.base().0,
+                                data,
+                            )
+                        }) {
+                        Ok(_) => {}
+                        Err(e) => error!("PIO write error {:?} at @{}", e, addr),
                     }
-                    METRICS.vcpu.exit_io_out.inc();
+                    METRICS.vcpu.exit_io_in.inc();
                 }
                 Ok(VcpuEmulation::Handled)
             }

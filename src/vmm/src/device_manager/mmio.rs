@@ -19,18 +19,18 @@ use devices::virtio::{
     Balloon, Block, MmioTransport, Net, VirtioDevice, TYPE_BALLOON, TYPE_BLOCK, TYPE_NET,
     TYPE_VSOCK,
 };
-use devices::BusDevice;
 use kernel::cmdline as kernel_cmdline;
 use kvm_ioctls::{IoEventAddress, VmFd};
 use logger::info;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
+use vm_device::{bus::MmioAddress, bus::MmioRange};
 
 /// Errors for MMIO device manager.
 #[derive(Debug)]
 pub enum Error {
     /// Failed to perform an operation on the bus.
-    BusError(devices::BusError),
+    BusError(vm_device::bus::Error),
     /// Appending to kernel command line failed.
     Cmdline(kernel_cmdline::Error),
     /// The device couldn't be found.
@@ -131,8 +131,8 @@ impl IrqManager {
 
 /// Manages the complexities of registering a MMIO device.
 pub struct MMIODeviceManager {
-    pub(crate) bus: devices::Bus,
-    pci_bus: Option<Arc<Mutex<dyn BusDevice>>>,
+    pub(crate) bus: crate::MmioBus,
+    pci_bus: Option<Arc<Mutex<dyn devices::MmioDevice>>>,
     mmio_base: u64,
     next_avail_mmio: u64,
     irqs: IrqManager,
@@ -147,7 +147,7 @@ impl MMIODeviceManager {
             pci_bus: None,
             next_avail_mmio: mmio_base,
             irqs: IrqManager::new(irq_interval.0, irq_interval.1),
-            bus: devices::Bus::new(),
+            bus: crate::MmioBus::new(),
             id_to_dev_info: HashMap::new(),
         }
     }
@@ -173,14 +173,18 @@ impl MMIODeviceManager {
     }
 
     /// Register the PCI bus.
-    pub fn register_pci_bus(&mut self, pci_bus: Arc<Mutex<dyn BusDevice>>) -> Result<()> {
+    pub fn register_pci_bus(&mut self, pci_bus: Arc<Mutex<dyn devices::MmioDevice>>) -> Result<()> {
         self.bus
-            .insert(
+            .register(
+                MmioRange::new(
+                    MmioAddress(arch::PCI_MMCONFIG_START),
+                    arch::PCI_MMCONFIG_SIZE,
+                )
+                .unwrap(),
                 Arc::clone(&pci_bus),
-                arch::PCI_MMCONFIG_START,
-                arch::PCI_MMCONFIG_SIZE,
             )
             .map_err(Error::BusError)?;
+
         self.pci_bus = Some(pci_bus);
         Ok(())
     }
@@ -190,10 +194,13 @@ impl MMIODeviceManager {
         &mut self,
         identifier: (DeviceType, String),
         slot: MMIODeviceInfo,
-        device: Arc<Mutex<dyn BusDevice>>,
+        device: Arc<Mutex<dyn devices::MmioDevice>>,
     ) -> Result<()> {
         self.bus
-            .insert(device, slot.addr, slot.len)
+            .register(
+                MmioRange::new(MmioAddress(slot.addr), slot.len).unwrap(),
+                device,
+            )
             .map_err(Error::BusError)?;
         self.id_to_dev_info.insert(identifier, slot);
         Ok(())
@@ -343,13 +350,13 @@ impl MMIODeviceManager {
         &self,
         device_type: DeviceType,
         device_id: &str,
-    ) -> Option<&Mutex<dyn BusDevice>> {
+    ) -> Option<Arc<Mutex<dyn devices::MmioDevice>>> {
         if let Some(dev_info) = self
             .id_to_dev_info
             .get(&(device_type, device_id.to_string()))
         {
-            if let Some((_, _, device)) = self.bus.get_device(dev_info.addr) {
-                return Some(device);
+            if let Some((_, device)) = self.bus.device(MmioAddress(dev_info.addr)) {
+                return Some(device.clone());
             }
         }
         None
@@ -362,7 +369,7 @@ impl MMIODeviceManager {
             &DeviceType,
             &String,
             &MMIODeviceInfo,
-            &Mutex<dyn BusDevice>,
+            &Mutex<dyn devices::MmioDevice>,
         ) -> std::result::Result<(), E>,
     {
         for ((device_type, device_id), device_info) in self.get_device_info().iter() {
@@ -370,16 +377,16 @@ impl MMIODeviceManager {
                 .get_device(*device_type, device_id)
                 // Safe to unwrap() because we know the device exists.
                 .unwrap();
-            f(device_type, device_id, device_info, bus_device)?;
+            f(device_type, device_id, device_info, &bus_device)?;
         }
         Ok(())
     }
 
     /// Run fn `f()` for the virtio device matching `virtio_type` and `id`.
-    pub fn with_virtio_device_with_id<T, F>(&self, virtio_type: u32, id: &str, f: F) -> Result<()>
+    pub fn with_virtio_device_with_id<T, F, V>(&self, virtio_type: u32, id: &str, f: F) -> Result<V>
     where
         T: VirtioDevice + 'static,
-        F: FnOnce(&mut T) -> std::result::Result<(), String>,
+        F: FnOnce(&mut T) -> std::result::Result<V, String>,
     {
         if let Some(busdev) = self.get_device(DeviceType::Virtio(virtio_type), id) {
             let virtio_device = busdev
@@ -390,15 +397,14 @@ impl MMIODeviceManager {
                 .expect("Unexpected BusDevice type")
                 .device();
             let mut dev = virtio_device.lock().expect("Poisoned lock");
-            f(dev
+            Ok(f(dev
                 .as_mut_any()
                 .downcast_mut::<T>()
                 .ok_or(Error::IncorrectDeviceType)?)
-            .map_err(Error::InternalDeviceError)?;
+            .map_err(Error::InternalDeviceError)?)
         } else {
             return Err(Error::DeviceNotFound);
         }
-        Ok(())
     }
 
     /// Artificially kick devices as if they had external events.

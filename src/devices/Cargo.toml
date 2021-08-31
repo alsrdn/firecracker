@@ -22,6 +22,8 @@ serde = { version = ">=1.0.27", features = ["derive"] }
 snapshot = { path = "../snapshot" }
 utils = { path = "../utils" }
 virtio_gen = { path = "../virtio_gen" }
+vm-device = { git = "https://github.com/sandreim/vm-device", branch = "master"}
+pci = {path = "../pci"}
 
 [dev-dependencies]
 proptest = ">=1.0.0"
