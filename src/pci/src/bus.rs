@@ -2,16 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
-use crate::configuration::{PciBridgeSubclass, PciClassCode, PciConfiguration, PciHeaderType};
+use crate::configuration::{PciBridgeSubclass, PciClassCode, PciConfiguration, PciHeaderType, PciCapability, PciCapabilityId};
 use crate::device::PciDevice;
 use byteorder::{ByteOrder, LittleEndian};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Barrier, Mutex};
 use vm_device::{bus::MmioAddress, bus::PioAddress, MutDeviceMmio, MutDevicePio};
+use vm_memory::ByteValued;
 
 const VENDOR_ID_INTEL: u16 = 0x8086;
-const DEVICE_ID_INTEL_VIRT_PCIE_HOST: u16 = 0x0d57;
+const DEVICE_ID_IOH_EPORT: u16 = 0x3420;
+const DEVICE_ID_IOH_REV: u8 = 0x2;
 const NUM_DEVICE_IDS: usize = 32;
 
 /// Errors for device manager.
@@ -28,6 +30,57 @@ pub enum PciRootError {
 }
 pub type Result<T> = std::result::Result<T, PciRootError>;
 
+#[repr(packed)]
+#[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
+struct SsvidCap {
+    reserved: u16,
+    svid: u16,
+    ssid: u16,
+}
+
+unsafe impl ByteValued for SsvidCap {}
+
+impl PciCapability for SsvidCap {
+    fn bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+
+    fn id(&self) -> PciCapabilityId {
+        PciCapabilityId::BridgeSubsystemVendorDeviceId
+    }
+}
+
+#[repr(packed)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct PcieCap {
+    ptype: u16,
+    data: [u8; 59],
+}
+
+unsafe impl ByteValued for PcieCap {}
+
+impl PciCapability for PcieCap {
+    fn bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+
+    fn id(&self) -> PciCapabilityId {
+        PciCapabilityId::PciExpress
+    }
+}
+
+impl Default for PcieCap {
+    #[inline]
+    fn default() -> PcieCap {
+        PcieCap {
+            ptype: 0x42, //Express (v2) Root Port
+            data: [0; 59],
+        }
+    }
+}
+
 /// Emulates the PCI Root bridge device.
 pub struct PciRoot {
     /// Configuration space.
@@ -40,20 +93,29 @@ impl PciRoot {
         if let Some(config) = config {
             PciRoot { config }
         } else {
-            PciRoot {
+            let mut root = PciRoot {
                 config: PciConfiguration::new(
                     VENDOR_ID_INTEL,
-                    DEVICE_ID_INTEL_VIRT_PCIE_HOST,
-                    0,
+                    DEVICE_ID_IOH_EPORT,
+                    DEVICE_ID_IOH_REV,
                     PciClassCode::BridgeDevice,
-                    &PciBridgeSubclass::HostBridge,
+                    &PciBridgeSubclass::PciToPciBridge,
                     None,
-                    PciHeaderType::Device,
-                    0,
+                    PciHeaderType::Bridge,
+                    VENDOR_ID_INTEL,
                     0,
                     None,
                 ),
-            }
+            };
+            let ssvid_cap = SsvidCap {
+                reserved: 0,
+                svid: VENDOR_ID_INTEL,
+                ssid: 0,
+            };
+            root.config.add_capability(&ssvid_cap).unwrap();
+            let pcie_cap = PcieCap::default();
+            root.config.add_capability(&pcie_cap).unwrap();
+            root
         }
     }
 }
@@ -86,11 +148,11 @@ pub struct PciBus {
 }
 
 impl PciBus {
-    pub fn new(pci_root: PciRoot) -> Self {
+    pub fn new(pci_root: Arc<Mutex<dyn PciDevice>>) -> Self {
         let mut devices: HashMap<u32, Arc<Mutex<dyn PciDevice>>> = HashMap::new();
         let mut device_ids: Vec<bool> = vec![false; NUM_DEVICE_IDS];
 
-        devices.insert(0, Arc::new(Mutex::new(pci_root)));
+        devices.insert(0, pci_root);
         device_ids[0] = true;
 
         PciBus {

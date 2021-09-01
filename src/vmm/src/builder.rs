@@ -445,8 +445,8 @@ fn create_vmm_and_vcpus(
         MMIODeviceManager::new(arch::MMIO_MEM_START, (arch::IRQ_BASE, arch::IRQ_MAX));
 
     let vcpus;
-    let pci_root = PciRoot::new(None);
-    let pci_bus = PciBus::new(pci_root);
+    let pci_root_port = Arc::new(Mutex::new(PciRoot::new(None)));
+    let pci_bus = PciBus::new(pci_root_port);
 
     let pci_bus = Arc::new(Mutex::new(pci_bus));
 
