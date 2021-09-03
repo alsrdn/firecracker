@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
-use crate::configuration::{PciBridgeSubclass, PciClassCode, PciConfiguration, PciHeaderType, PciCapability, PciCapabilityId};
+use crate::configuration::{
+    PciBridgeSubclass, PciCapability, PciCapabilityId, PciClassCode, PciConfiguration,
+    PciHeaderType,
+};
 use crate::device::PciDevice;
 use byteorder::{ByteOrder, LittleEndian};
 use std::any::Any;

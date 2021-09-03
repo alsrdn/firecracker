@@ -5,7 +5,6 @@ authors = ["Samuel Ortiz <sameo@linux.intel.com>"]
 edition = "2018"
 
 [dependencies]
-anyhow = "1.0"
 byteorder = "1.4.3"
 vmm-sys-util = ">=0.3.1"
 libc = ">=0.2.39"

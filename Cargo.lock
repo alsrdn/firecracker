@@ -12,12 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.40"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28b2cd92db5cbd74e8e5028f7e27dd7aa3090e89e4f2a197cc7c8dfb69c7063b"
-
-[[package]]
 name = "api_server"
 version = "0.1.0"
 dependencies = [
@@ -564,7 +558,6 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 name = "pci"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "byteorder",
  "kvm-bindings",
  "kvm-ioctls",

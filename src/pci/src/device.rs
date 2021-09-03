@@ -45,7 +45,7 @@ pub struct BarReprogrammingParams {
     pub region_type: PciBarRegionType,
 }
 
-pub trait PciDevice: Send + Sync {
+pub trait PciDevice: Send {
     /// Allocates the needed PCI BARs space using the `allocate` function which takes a size and
     /// returns an address. Returns a Vec of (GuestAddress, GuestUsize) tuples.
     fn allocate_bars(

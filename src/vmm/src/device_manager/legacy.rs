@@ -42,7 +42,6 @@ pub struct PortIODeviceManager {
     pub io_bus: crate::PioBus,
     pub stdio_serial: Arc<Mutex<devices::legacy::Serial>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
-    pub pci_bus: Arc<Mutex<dyn devices::PioDevice>>,
 
     pub com_evt_1_3: EventFd,
     pub com_evt_2_4: EventFd,
@@ -54,7 +53,6 @@ impl PortIODeviceManager {
     pub fn new(
         serial: Arc<Mutex<devices::legacy::Serial>>,
         i8042_reset_evfd: EventFd,
-        pci_bus: Arc<Mutex<dyn devices::PioDevice>>,
     ) -> Result<Self> {
         let io_bus = Bus::new();
         let com_evt_1_3 = serial
@@ -75,22 +73,21 @@ impl PortIODeviceManager {
             io_bus,
             stdio_serial: serial,
             i8042,
-            pci_bus,
             com_evt_1_3,
             com_evt_2_4,
             kbd_evt,
         })
     }
 
+    pub fn register_pci_bus(&mut self, pci_bus: Arc<Mutex<dyn devices::PioDevice>>) -> Result<()> {
+        self.io_bus
+            .register(PioRange::new(PioAddress(0xcf8), 0x8).unwrap(), pci_bus)
+            .map_err(Error::BusError)?;
+        Ok(())
+    }
+
     /// Register supported legacy devices.
     pub fn register_devices(&mut self, vm_fd: &VmFd) -> Result<()> {
-        self.io_bus
-            .register(
-                PioRange::new(PioAddress(0xcf8), 0x8).unwrap(),
-                Arc::clone(&self.pci_bus),
-            )
-            .map_err(Error::BusError)?;
-
         self.io_bus
             .register(
                 PioRange::new(PioAddress(0x3f8), 0x8).unwrap(),

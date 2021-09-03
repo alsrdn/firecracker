@@ -66,7 +66,7 @@ use seccompiler::BpfProgram;
 use snapshot::Persist;
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
-use vm_memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
+use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
 
 /// Shorthand type for the EventManager flavour used by Firecracker.
 pub type EventManager = BaseEventManager<Arc<Mutex<dyn MutEventSubscriber>>>;
@@ -212,7 +212,7 @@ impl Display for Error {
 }
 
 /// Trait for objects that need custom initialization and teardown during the Vmm lifetime.
-pub trait VmmEventsObserver {
+pub trait VmmEventsObserver: Sync + Send {
     /// This function will be called during microVm boot.
     fn on_vmm_boot(&mut self) -> std::result::Result<(), utils::errno::Error> {
         Ok(())
@@ -254,10 +254,77 @@ pub struct Vmm {
     // Used by Vcpus and devices to initiate teardown; Vmm should never write here.
     vcpus_exit_evt: EventFd,
 
-    // Guest VM devices.
-    mmio_device_manager: MMIODeviceManager,
+    /// Guest mmio devices.
+    pub mmio_device_manager: MMIODeviceManager,
     #[cfg(target_arch = "x86_64")]
-    pio_device_manager: PortIODeviceManager,
+    /// Guest pio devices.
+    pub pio_device_manager: PortIODeviceManager,
+}
+
+use kvm_bindings::{kvm_userspace_memory_region, KVM_MEM_READONLY};
+use pci::{Hypervisor, HypervisorError};
+
+/// Low level wrapper that we need to provide as backend for PCI/VFIO.
+struct KvmHypervisor {
+    vm_fd: kvm_ioctls::VmFd,
+    // We use 1 or 2 slots depending on guest mem size.
+    // Dynamic memory slots start at 16. We are going to be using these slots
+    // to map PCI device memory regions.
+    mem_slot_index: u32,
+}
+
+impl Hypervisor for KvmHypervisor {
+    fn map_device_memory_region(
+        &mut self,
+        slot: u32,
+        hva: u64,
+        gpa: GuestAddress,
+        len: u64,
+        readonly: bool,
+    ) -> std::result::Result<(), io::Error> {
+        let region = kvm_userspace_memory_region {
+            slot: slot,
+            guest_phys_addr: gpa.0,
+            memory_size: len,
+            userspace_addr: hva,
+            flags: if readonly { KVM_MEM_READONLY } else { 0 },
+        };
+
+        unsafe {
+            self.vm_fd
+                .set_user_memory_region(region)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        }
+
+        Ok(())
+    }
+
+    fn new_mem_slot(&mut self) -> u32 {
+        let slot = self.mem_slot_index;
+        self.mem_slot_index += 1;
+        slot
+    }
+
+    fn set_gsi_routing(
+        &mut self,
+        irq_routing: &kvm_irq_routing,
+    ) -> std::result::Result<(), HypervisorError> {
+        self.vm_fd
+            .set_gsi_routing(irq_routing)
+            .map_err(|_| HypervisorError::SetGsiRouting)
+    }
+
+    fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> std::result::Result<(), HypervisorError> {
+        self.vm_fd
+            .register_irqfd(fd, gsi)
+            .map_err(|_| HypervisorError::RegisterIrqFd)
+    }
+
+    fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> std::result::Result<(), HypervisorError> {
+        self.vm_fd
+            .unregister_irqfd(fd, gsi)
+            .map_err(|_| HypervisorError::UnregisterIrqFd)
+    }
 }
 
 impl Vmm {

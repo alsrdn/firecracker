@@ -5,7 +5,6 @@
 
 // use devices::interrupt_controller::InterruptController;
 // use hypervisor::IrqRoutingEntry;
-use kvm_ioctls::VmFd;
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,14 +40,18 @@ impl InterruptRoute {
         })
     }
 
-    pub fn enable(&self, vm: &VmFd) -> Result<()> {
+    pub fn enable(&self, hypervisor: &Arc<Mutex<dyn Hypervisor>>) -> Result<()> {
         if !self.registered.load(Ordering::Acquire) {
-            vm.register_irqfd(&self.irq_fd, self.gsi).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed registering irq_fd: {}", e),
-                )
-            })?;
+            hypervisor
+                .lock()
+                .expect("bad lock")
+                .register_irqfd(&self.irq_fd, self.gsi)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed registering irq_fd: {}", e),
+                    )
+                })?;
 
             // Update internals to track the irq_fd as "registered".
             self.registered.store(true, Ordering::Release);
@@ -57,14 +60,18 @@ impl InterruptRoute {
         Ok(())
     }
 
-    pub fn disable(&self, vm: &VmFd) -> Result<()> {
+    pub fn disable(&self, hypervisor: &Arc<Mutex<dyn Hypervisor>>) -> Result<()> {
         if self.registered.load(Ordering::Acquire) {
-            vm.unregister_irqfd(&self.irq_fd, self.gsi).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed unregistering irq_fd: {}", e),
-                )
-            })?;
+            hypervisor
+                .lock()
+                .expect("bad lock")
+                .unregister_irqfd(&self.irq_fd, self.gsi)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed unregistering irq_fd: {}", e),
+                    )
+                })?;
 
             // Update internals to track the irq_fd as "unregistered".
             self.registered.store(false, Ordering::Release);
@@ -92,7 +99,7 @@ pub struct RoutingEntry<IrqRoutingEntry> {
 }
 
 pub struct MsiInterruptGroup<IrqRoutingEntry> {
-    vm: Arc<Mutex<VmFd>>,
+    hypervisor: Arc<Mutex<dyn Hypervisor>>,
     gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
     irq_routes: HashMap<InterruptIndex, InterruptRoute>,
 }
@@ -134,7 +141,7 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
             entries_slice.copy_from_slice(&entry_vec);
         }
 
-        self.vm
+        self.hypervisor
             .lock()
             .expect("Poisoned VmFd lock")
             .set_gsi_routing(&irq_routing[0])
@@ -149,12 +156,12 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
 
 impl<IrqRoutingEntry> MsiInterruptGroup<IrqRoutingEntry> {
     fn new(
-        vm: Arc<Mutex<VmFd>>,
+        hypervisor: Arc<Mutex<dyn Hypervisor>>,
         gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
         irq_routes: HashMap<InterruptIndex, InterruptRoute>,
     ) -> Self {
         MsiInterruptGroup {
-            vm,
+            hypervisor,
             gsi_msi_routes,
             irq_routes,
         }
@@ -164,7 +171,7 @@ impl<IrqRoutingEntry> MsiInterruptGroup<IrqRoutingEntry> {
 impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
     fn enable(&self) -> Result<()> {
         for (_, route) in self.irq_routes.iter() {
-            route.enable(&self.vm.lock().expect("Poisoned lock"))?;
+            route.enable(&self.hypervisor)?;
         }
 
         Ok(())
@@ -172,7 +179,7 @@ impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
 
     fn disable(&self) -> Result<()> {
         for (_, route) in self.irq_routes.iter() {
-            route.disable(&self.vm.lock().expect("Poisoned lock"))?;
+            route.disable(&self.hypervisor)?;
         }
 
         Ok(())
@@ -223,7 +230,7 @@ impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
                 ));
             }
             self.set_gsi_routes(&routes)?;
-            return route.disable(&self.vm.lock().expect("Poisoned lock"));
+            return route.disable(&self.hypervisor);
         }
 
         Err(io::Error::new(
@@ -244,7 +251,7 @@ impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
                 ));
             }
             self.set_gsi_routes(&routes)?;
-            return route.enable(&&self.vm.lock().expect("Poisoned lock"));
+            return route.enable(&self.hypervisor);
         }
 
         Err(io::Error::new(
@@ -256,12 +263,15 @@ impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
 
 pub struct MsiInterruptManager<IrqRoutingEntry> {
     allocator: Arc<Mutex<SystemAllocator>>,
-    vm: Arc<Mutex<VmFd>>,
+    hypervisor: Arc<Mutex<dyn Hypervisor>>,
     gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
 }
 
 impl MsiInterruptManager<IrqRoutingEntry> {
-    pub fn new(allocator: Arc<Mutex<SystemAllocator>>, vm: Arc<Mutex<VmFd>>) -> Self {
+    pub fn new(
+        allocator: Arc<Mutex<SystemAllocator>>,
+        hypervisor: Arc<Mutex<dyn Hypervisor>>,
+    ) -> Self {
         // Create a shared list of GSI that can be shared through all PCI
         // devices. This way, we can maintain the full list of used GSI,
         // preventing one device from overriding interrupts setting from
@@ -270,7 +280,7 @@ impl MsiInterruptManager<IrqRoutingEntry> {
 
         MsiInterruptManager {
             allocator,
-            vm,
+            hypervisor,
             gsi_msi_routes,
         }
     }
@@ -291,7 +301,7 @@ impl InterruptManager for MsiInterruptManager<IrqRoutingEntry> {
         }
 
         Ok(Arc::new(Box::new(MsiInterruptGroup::new(
-            self.vm.clone(),
+            self.hypervisor.clone(),
             self.gsi_msi_routes.clone(),
             irq_routes,
         ))))

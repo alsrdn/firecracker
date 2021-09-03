@@ -9,7 +9,6 @@ use crate::{
 };
 
 use byteorder::{ByteOrder, LittleEndian};
-use kvm_ioctls::VmFd;
 use std::any::Any;
 use std::os::unix::io::AsRawFd;
 use std::ptr::null_mut;
@@ -46,8 +45,6 @@ pub enum VfioPciError {
     EnableMsix(VfioError),
     EventFd(io::Error),
     InterruptSourceGroupCreate(io::Error),
-    // IrqFd(hypervisor::HypervisorVmError),
-    MapRegionGuest(anyhow::Error),
     MissingNotifier,
     MsiNotConfigured,
     MsixNotConfigured,
@@ -67,9 +64,6 @@ impl fmt::Display for VfioPciError {
             VfioPciError::EventFd(e) => write!(f, "failed to create eventfd: {}", e),
             VfioPciError::InterruptSourceGroupCreate(e) => {
                 write!(f, "failed to create interrupt source group: {}", e)
-            }
-            VfioPciError::MapRegionGuest(e) => {
-                write!(f, "failed to map VFIO PCI region into guest: {}", e)
             }
             VfioPciError::MissingNotifier => write!(f, "failed to notifier's eventfd"),
             VfioPciError::MsiNotConfigured => write!(f, "MSI interrupt not yet configured"),
@@ -254,6 +248,47 @@ pub struct MmioRegion {
     mmap_size: Option<usize>,
 }
 
+#[derive(Debug)]
+pub enum HypervisorError {
+    SetGsiRouting,
+    RegisterIrqFd,
+    UnregisterIrqFd,
+}
+
+impl std::fmt::Display for HypervisorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            HypervisorError::SetGsiRouting => {
+                write!(f, "Failed to set routing")
+            }
+            HypervisorError::RegisterIrqFd => {
+                write!(f, "Failed to register irq fd")
+            }
+            HypervisorError::UnregisterIrqFd => {
+                write!(f, "Failed to unregister irq fd")
+            }
+        }
+    }
+}
+/// Trait that abstracts high Hypervisor functionality.
+pub trait Hypervisor: Sync + Send {
+    fn map_device_memory_region(
+        &mut self,
+        slot: u32,
+        hva: u64,
+        gpa: GuestAddress,
+        len: u64,
+        readonly: bool,
+    ) -> std::result::Result<(), io::Error>;
+    fn new_mem_slot(&mut self) -> u32;
+    fn set_gsi_routing(
+        &mut self,
+        irq_routing: &kvm_irq_routing,
+    ) -> std::result::Result<(), HypervisorError>;
+    fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> std::result::Result<(), HypervisorError>;
+    fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> std::result::Result<(), HypervisorError>;
+}
+
 struct VfioPciConfig {
     device: Arc<VfioDevice>,
 }
@@ -301,7 +336,7 @@ impl VfioPciConfig {
 /// The VMM creates a VfioDevice, then assigns it to a VfioPciDevice,
 /// which then gets added to the PCI bus.
 pub struct VfioPciDevice {
-    vm: Arc<Mutex<VmFd>>,
+    hypervisor: Arc<Mutex<dyn Hypervisor>>,
     device: Arc<VfioDevice>,
     container: Arc<VfioContainer>,
     vfio_pci_configuration: VfioPciConfig,
@@ -314,7 +349,7 @@ pub struct VfioPciDevice {
 impl VfioPciDevice {
     /// Constructs a new Vfio Pci device for the given Vfio device
     pub fn new(
-        vm: Arc<Mutex<VmFd>>,
+        hypervisor: Arc<Mutex<dyn Hypervisor>>,
         device: VfioDevice,
         container: Arc<VfioContainer>,
         msi_interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
@@ -340,7 +375,7 @@ impl VfioPciDevice {
         let vfio_pci_configuration = VfioPciConfig::new(Arc::clone(&device));
 
         let mut vfio_pci_device = VfioPciDevice {
-            vm: Arc::clone(&vm),
+            hypervisor,
             device,
             container,
             configuration,
@@ -621,28 +656,6 @@ impl VfioPciDevice {
         None
     }
 
-    fn make_user_memory_region(
-        slot: u32,
-        guest_phys_addr: u64,
-        memory_size: u64,
-        userspace_addr: u64,
-        readonly: bool,
-        log_dirty_pages: bool,
-    ) -> MemoryRegion {
-        use kvm_bindings::{KVM_MEM_LOG_DIRTY_PAGES, KVM_MEM_READONLY};
-        MemoryRegion {
-            slot,
-            guest_phys_addr,
-            memory_size,
-            userspace_addr,
-            flags: if readonly { KVM_MEM_READONLY } else { 0 }
-                | if log_dirty_pages {
-                    KVM_MEM_LOG_DIRTY_PAGES
-                } else {
-                    0
-                },
-        }
-    }
     /// Map MMIO regions into the guest, and avoid VM exits when the guest tries
     /// to reach those regions.
     ///
@@ -653,9 +666,8 @@ impl VfioPciDevice {
     /// * `mem_slot` - The closure to return a memory slot.
     pub fn map_mmio_regions(&mut self) -> Result<()> {
         let fd = self.device.as_raw_fd();
-        let mut slot = 2;
-
         error!("Mmap mmio regions count {}", self.mmio_regions.len());
+
         for region in self.mmio_regions.iter_mut() {
             // We want to skip the mapping of the BAR containing the MSI-X
             // table even if it is mappable. The reason is we need to trap
@@ -701,6 +713,8 @@ impl VfioPciDevice {
                     continue;
                 }
 
+                let slot = self.hypervisor.lock().expect("bad lock").new_mem_slot();
+
                 error!(
                     "Mmap slot {} gpa {:x} size {} hva {:x}",
                     slot,
@@ -709,35 +723,22 @@ impl VfioPciDevice {
                     host_addr as u64
                 );
 
-                let mem_region = Self::make_user_memory_region(
-                    slot,
-                    region.start.raw_value() + mmap_offset,
-                    mmap_size as u64,
-                    host_addr as u64,
-                    false,
-                    false,
-                );
-
-                unsafe {
-                    self.vm
-                        .lock()
-                        .expect("Poisoned lock")
-                        .set_user_memory_region(mem_region)
-                        .map_err(|e| VfioPciError::MapRegionGuest(e.into()))?;
-                }
-
-                // self.container.vfio_dma_map(
-                //     region.start.raw_value() + mmap_offset,
-                //     mmap_size,
-                //     host_addr as u64
-                // ).unwrap();
+                self.hypervisor
+                    .lock()
+                    .expect("bad lock")
+                    .map_device_memory_region(
+                        slot,
+                        host_addr as u64,
+                        region.start.checked_add(mmap_offset).unwrap(),
+                        mmap_size,
+                        false,
+                    )
+                    .unwrap();
 
                 // Update the region with memory mapped info.
                 region.mem_slot = Some(slot);
                 region.host_addr = Some(host_addr as u64);
                 region.mmap_size = Some(mmap_size as usize);
-
-                slot += 1;
             }
         }
 
@@ -750,26 +751,17 @@ impl VfioPciDevice {
                 (region.host_addr, region.mmap_size, region.mem_slot)
             {
                 let (mmap_offset, _) = self.device.get_region_mmap(region.index);
-
-                // Remove region
-                let r = Self::make_user_memory_region(
-                    mem_slot,
-                    region.start.raw_value() + mmap_offset,
-                    0,
-                    host_addr as u64,
-                    false,
-                    false,
-                );
-
-                if let Err(e) = unsafe {
-                    self.vm
-                        .lock()
-                        .expect("Poisoned lock")
-                        .set_user_memory_region(r)
-                } {
-                    error!("Could not remove the userspace memory region: {}", e);
-                }
-
+                self.hypervisor
+                    .lock()
+                    .expect("bad lock")
+                    .map_device_memory_region(
+                        mem_slot,
+                        host_addr,
+                        region.start.checked_add(mmap_offset).unwrap(),
+                        0,
+                        false,
+                    )
+                    .unwrap();
                 let ret = unsafe { libc::munmap(host_addr as *mut libc::c_void, mmap_size) };
                 if ret != 0 {
                     error!(
@@ -1190,41 +1182,30 @@ impl PciDevice for VfioPciDevice {
                     if let Some(host_addr) = region.host_addr {
                         let (mmap_offset, mmap_size) = self.device.get_region_mmap(region.index);
 
-                        // Remove old region
-                        let old_mem_region = Self::make_user_memory_region(
-                            mem_slot,
-                            old_base + mmap_offset,
-                            0,
-                            host_addr as u64,
-                            false,
-                            false,
-                        );
-
-                        unsafe {
-                            self.vm
-                                .lock()
-                                .expect("Poisoned lock")
-                                .set_user_memory_region(old_mem_region)
-                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                        }
+                        self.hypervisor
+                            .lock()
+                            .expect("bad lock")
+                            .map_device_memory_region(
+                                mem_slot,
+                                host_addr,
+                                GuestAddress::new(old_base + mmap_offset),
+                                0,
+                                false,
+                            )
+                            .unwrap();
 
                         // Insert new region
-                        let new_mem_region = Self::make_user_memory_region(
-                            mem_slot,
-                            new_base + mmap_offset,
-                            mmap_size as u64,
-                            host_addr as u64,
-                            false,
-                            false,
-                        );
-
-                        unsafe {
-                            self.vm
-                                .lock()
-                                .expect("Poisoned lock")
-                                .set_user_memory_region(new_mem_region)
-                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                        }
+                        self.hypervisor
+                            .lock()
+                            .expect("bad lock")
+                            .map_device_memory_region(
+                                mem_slot,
+                                host_addr,
+                                GuestAddress::new(new_base + mmap_offset),
+                                mmap_size,
+                                false,
+                            )
+                            .unwrap();
                     }
                 }
             }

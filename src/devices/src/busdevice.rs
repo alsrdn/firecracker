@@ -12,13 +12,13 @@ use vm_device::{MutDeviceMmio, MutDevicePio};
 
 /// PioDevice will implement AsAny as required to cast Bus devices
 /// to concrete MmioTransport later.
-pub trait PioDevice: MutDevicePio + Send + AsAny {
+pub trait PioDevice: MutDevicePio + AsAny + Send {
     fn interrupt(&self, _irq_mask: u32) -> std::io::Result<()> {
         Ok(())
     }
 }
 
-pub trait MmioDevice: MutDeviceMmio + Send + AsAny {
+pub trait MmioDevice: MutDeviceMmio + AsAny + Send {
     fn interrupt(&self, _irq_mask: u32) -> std::io::Result<()> {
         Ok(())
     }
