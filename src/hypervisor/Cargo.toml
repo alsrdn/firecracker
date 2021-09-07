@@ -1,0 +1,9 @@
+[package]
+name = "hypervisor"
+version = "0.1.0"
+authors = ["Andrei Sandu <sandreim@amazon.com>"]
+edition = "2018"
+
+[dependencies]
+vmm-sys-util = ">=0.3.1"
+vm-memory = { version = ">=0.2.2", features = ["backend-mmap"] }
