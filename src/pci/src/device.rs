@@ -5,9 +5,9 @@
 use crate::configuration::{self, PciBarRegionType};
 use std::any::Any;
 use std::fmt::{self, Display};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::{self, io, result};
-use vm_allocator::SystemAllocator;
+use vm_allocator::{AddressAllocatorError, SystemAllocator};
 use vm_memory::{GuestAddress, GuestUsize};
 
 #[derive(Debug)]
@@ -15,7 +15,7 @@ pub enum Error {
     /// Setup of the device capabilities failed.
     CapabilitiesSetup(configuration::Error),
     /// Allocating space for an IO BAR failed.
-    IoAllocationFailed(u64),
+    IoAllocationFailed(AddressAllocatorError),
     /// Registering an IO BAR failed.
     IoRegistrationFailed(u64, configuration::Error),
 }
@@ -27,8 +27,8 @@ impl Display for Error {
 
         match self {
             CapabilitiesSetup(e) => write!(f, "failed to add capability {}", e),
-            IoAllocationFailed(size) => {
-                write!(f, "failed to allocate space for an IO BAR, size={}", size)
+            IoAllocationFailed(e) => {
+                write!(f, "failed to allocate space for an IO BAR, error={:?}", e)
             }
             IoRegistrationFailed(addr, e) => {
                 write!(f, "failed to register an IO BAR, addr={} err={}", addr, e)
@@ -50,13 +50,13 @@ pub trait PciDevice: Send {
     /// returns an address. Returns a Vec of (GuestAddress, GuestUsize) tuples.
     fn allocate_bars(
         &mut self,
-        _allocator: &mut SystemAllocator,
+        _allocator: Arc<Mutex<dyn SystemAllocator>>,
     ) -> Result<Vec<(GuestAddress, GuestUsize, PciBarRegionType)>> {
         Ok(Vec::new())
     }
 
     /// Frees the PCI BARs previously allocated with a call to allocate_bars().
-    fn free_bars(&mut self, _allocator: &mut SystemAllocator) -> Result<()> {
+    fn free_bars(&mut self, _allocator: Arc<Mutex<dyn SystemAllocator>>) -> Result<()> {
         Ok(())
     }
 

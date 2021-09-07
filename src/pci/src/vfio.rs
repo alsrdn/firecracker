@@ -21,11 +21,11 @@ use vm_device::interrupt::{
     InterruptIndex, InterruptManager, InterruptSourceGroup, MsiIrqGroupConfig,
 };
 
+use hypervisor::Hypervisor;
 use vm_allocator::SystemAllocator;
 use vm_device::{bus::MmioAddress, MutDeviceMmio};
 use vm_memory::{Address, GuestAddress, GuestUsize};
 use vmm_sys_util::eventfd::EventFd;
-
 pub use {
     kvm_bindings::kvm_clock_data as ClockData, kvm_bindings::kvm_create_device as CreateDevice,
     kvm_bindings::kvm_device_attr as DeviceAttr, kvm_bindings::kvm_irq_routing,
@@ -248,47 +248,6 @@ pub struct MmioRegion {
     mmap_size: Option<usize>,
 }
 
-#[derive(Debug)]
-pub enum HypervisorError {
-    SetGsiRouting,
-    RegisterIrqFd,
-    UnregisterIrqFd,
-}
-
-impl std::fmt::Display for HypervisorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
-            HypervisorError::SetGsiRouting => {
-                write!(f, "Failed to set routing")
-            }
-            HypervisorError::RegisterIrqFd => {
-                write!(f, "Failed to register irq fd")
-            }
-            HypervisorError::UnregisterIrqFd => {
-                write!(f, "Failed to unregister irq fd")
-            }
-        }
-    }
-}
-/// Trait that abstracts high Hypervisor functionality.
-pub trait Hypervisor: Sync + Send {
-    fn map_device_memory_region(
-        &mut self,
-        slot: u32,
-        hva: u64,
-        gpa: GuestAddress,
-        len: u64,
-        readonly: bool,
-    ) -> std::result::Result<(), io::Error>;
-    fn new_mem_slot(&mut self) -> u32;
-    fn set_gsi_routing(
-        &mut self,
-        irq_routing: &kvm_irq_routing,
-    ) -> std::result::Result<(), HypervisorError>;
-    fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> std::result::Result<(), HypervisorError>;
-    fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> std::result::Result<(), HypervisorError>;
-}
-
 struct VfioPciConfig {
     device: Arc<VfioDevice>,
 }
@@ -335,8 +294,8 @@ impl VfioPciConfig {
 /// A VfioPciDevice is bound to a VfioDevice and is also a PCI device.
 /// The VMM creates a VfioDevice, then assigns it to a VfioPciDevice,
 /// which then gets added to the PCI bus.
-pub struct VfioPciDevice {
-    hypervisor: Arc<Mutex<dyn Hypervisor>>,
+pub struct VfioPciDevice<T> {
+    hypervisor: Arc<Mutex<dyn Hypervisor<IrqRouting = T>>>,
     device: Arc<VfioDevice>,
     container: Arc<VfioContainer>,
     vfio_pci_configuration: VfioPciConfig,
@@ -346,10 +305,10 @@ pub struct VfioPciDevice {
     iommu_attached: bool,
 }
 
-impl VfioPciDevice {
+impl<T> VfioPciDevice<T> {
     /// Constructs a new Vfio Pci device for the given Vfio device
     pub fn new(
-        hypervisor: Arc<Mutex<dyn Hypervisor>>,
+        hypervisor: Arc<Mutex<dyn Hypervisor<IrqRouting = T>>>,
         device: VfioDevice,
         container: Arc<VfioContainer>,
         msi_interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
@@ -798,7 +757,7 @@ impl VfioPciDevice {
     }
 }
 
-impl Drop for VfioPciDevice {
+impl<T> Drop for VfioPciDevice<T> {
     fn drop(&mut self) {
         self.unmap_mmio_regions();
 
@@ -808,7 +767,7 @@ impl Drop for VfioPciDevice {
     }
 }
 
-impl MutDeviceMmio for VfioPciDevice {
+impl<T: Sized + 'static> MutDeviceMmio for VfioPciDevice<T> {
     fn mmio_read(&mut self, base: MmioAddress, offset: u64, data: &mut [u8]) {
         self.read_bar(base.0, offset, data);
     }
@@ -839,10 +798,10 @@ const PCI_CONFIG_BAR0_INDEX: usize = 4;
 // PCI ROM expansion BAR register index
 const PCI_ROM_EXP_BAR_INDEX: usize = 12;
 
-impl PciDevice for VfioPciDevice {
+impl<T: Sized + 'static> PciDevice for VfioPciDevice<T> {
     fn allocate_bars(
         &mut self,
-        allocator: &mut SystemAllocator,
+        allocator: Arc<Mutex<dyn SystemAllocator>>,
     ) -> std::result::Result<Vec<(GuestAddress, GuestUsize, PciBarRegionType)>, PciDeviceError>
     {
         let mut ranges = Vec::new();
@@ -912,8 +871,10 @@ impl PciDevice for VfioPciDevice {
                     // We need to allocate a guest PIO address range for that BAR.
                     // The address needs to be 4 bytes aligned.
                     bar_addr = allocator
+                        .lock()
+                        .expect("bad lock")
                         .allocate_io_addresses(None, region_size, Some(0x4))
-                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
+                        .map_err(PciDeviceError::IoAllocationFailed)?;
                 }
                 #[cfg(target_arch = "aarch64")]
                 unimplemented!()
@@ -959,12 +920,18 @@ impl PciDevice for VfioPciDevice {
                 };
                 if is_64bit_bar {
                     bar_addr = allocator
+                        .lock()
+                        .expect("bad lock")
                         .allocate_mmio_addresses(None, region_size, Some(bar_alignment))
-                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
+                        .map_err(PciDeviceError::IoAllocationFailed)?;
+                    error!("Bar addr: {:x}", bar_addr.0);
                 } else {
                     bar_addr = allocator
+                        .lock()
+                        .expect("bad lock")
                         .allocate_mmio_hole_addresses(None, region_size, Some(bar_alignment))
-                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
+                        .map_err(PciDeviceError::IoAllocationFailed)?;
+                    error!("Bar addr: {:x}", bar_addr.0);
                 }
             }
 
@@ -1014,21 +981,33 @@ impl PciDevice for VfioPciDevice {
 
     fn free_bars(
         &mut self,
-        allocator: &mut SystemAllocator,
+        allocator: Arc<Mutex<dyn SystemAllocator>>,
     ) -> std::result::Result<(), PciDeviceError> {
         for region in self.mmio_regions.iter() {
             match region.type_ {
                 PciBarRegionType::IoRegion => {
                     #[cfg(target_arch = "x86_64")]
-                    allocator.free_io_addresses(region.start, region.length);
+                    allocator
+                        .lock()
+                        .expect("bad lock")
+                        .free_io_addresses(region.start, region.length)
+                        .map_err(PciDeviceError::IoAllocationFailed)?;
                     #[cfg(target_arch = "aarch64")]
                     error!("I/O region is not supported");
                 }
                 PciBarRegionType::Memory32BitRegion => {
-                    allocator.free_mmio_hole_addresses(region.start, region.length);
+                    allocator
+                        .lock()
+                        .expect("bad lock")
+                        .free_mmio_hole_addresses(region.start, region.length)
+                        .map_err(PciDeviceError::IoAllocationFailed)?;
                 }
                 PciBarRegionType::Memory64BitRegion => {
-                    allocator.free_mmio_addresses(region.start, region.length);
+                    allocator
+                        .lock()
+                        .expect("bad lock")
+                        .free_mmio_addresses(region.start, region.length)
+                        .map_err(PciDeviceError::IoAllocationFailed)?;
                 }
             }
         }

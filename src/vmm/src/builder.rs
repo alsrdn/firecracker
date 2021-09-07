@@ -57,8 +57,7 @@ use vm_memory::GuestMemoryRegion;
 
 use crate::interrupt::KvmMsiInterruptManager as MsiInterruptManager;
 use crate::vmm_config::device::VfioDeviceConfig;
-use vm_allocator::GsiApic;
-use vm_allocator::SystemAllocator;
+use vm_allocator::{DefaultSystemAllocator, SystemAllocator};
 use vm_device::interrupt::{InterruptManager, MsiIrqGroupConfig};
 
 /// Errors associated with starting the instance.
@@ -241,13 +240,13 @@ fn create_passthrough_device(vm: &VmFd) -> DeviceFd {
 }
 
 fn add_vfio_device(
-    vm: Arc<Mutex<dyn pci::Hypervisor>>,
+    vm: Arc<Mutex<crate::KvmHypervisor>>,
     fd: DeviceFd,
     pci: Arc<Mutex<PciBus>>,
     dev_manager: &mut MMIODeviceManager,
     interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
     memory: GuestMemoryMmap,
-    allocator: Arc<Mutex<SystemAllocator>>,
+    allocator: Arc<Mutex<dyn SystemAllocator>>,
     vfio_device_config: VfioDeviceConfig,
 ) {
     // We need to shift the device id since the 3 first bits
@@ -299,7 +298,7 @@ fn add_vfio_device(
     let bars = vfio_pci_device
         .lock()
         .expect("bad lock")
-        .allocate_bars(&mut allocator.lock().expect("Poisoned lock"))
+        .allocate_bars(allocator.clone())
         .unwrap();
 
     // Register DMA mapping in IOMMU.
@@ -555,11 +554,8 @@ pub fn build_microvm_for_boot(
         let device_fd = create_passthrough_device(vmm.lock().expect("bad lock").vm.fd());
 
         // Create a system resources allocator.
-        const NUM_IOAPIC_PINS: usize = 24;
-        const X86_64_IRQ_BASE: u32 = 5;
-
         let allocator = Arc::new(Mutex::new(
-            SystemAllocator::new(
+            DefaultSystemAllocator::new(
                 #[cfg(target_arch = "x86_64")]
                 {
                     GuestAddress(0)
@@ -572,11 +568,6 @@ pub fn build_microvm_for_boot(
                 mmio_address_space_size(46),
                 GuestAddress(arch::MEM_32BIT_DEVICES_START),
                 arch::MEM_32BIT_DEVICES_SIZE,
-                #[cfg(target_arch = "x86_64")]
-                vec![GsiApic::new(
-                    X86_64_IRQ_BASE,
-                    NUM_IOAPIC_PINS as u32 - X86_64_IRQ_BASE,
-                )],
             )
             .unwrap(),
         ));
@@ -590,7 +581,7 @@ pub fn build_microvm_for_boot(
         // msi_interrupt_manager <- IOAPIC <- legacy_interrupt_manager.
         let msi_interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>> =
             Arc::new(MsiInterruptManager::new(
-                Arc::clone(&allocator),
+                allocator.clone(),
                 hypervisor.clone(),
             ));
 
@@ -603,7 +594,7 @@ pub fn build_microvm_for_boot(
             &mut vmm.lock().expect("bad lock").mmio_device_manager,
             Arc::clone(&msi_interrupt_manager),
             guest_memory,
-            Arc::clone(&allocator),
+            allocator.clone(),
             vm_resources.vfio_device_config.clone().unwrap(),
         );
 

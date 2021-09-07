@@ -4,7 +4,6 @@
 //
 
 // use devices::interrupt_controller::InterruptController;
-// use hypervisor::IrqRoutingEntry;
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,11 +26,8 @@ struct InterruptRoute {
 }
 
 impl InterruptRoute {
-    pub fn new(allocator: &mut SystemAllocator) -> Result<Self> {
+    pub fn new(gsi: u32) -> Result<Self> {
         let irq_fd = EventFd::new(libc::EFD_NONBLOCK)?;
-        let gsi = allocator
-            .allocate_gsi()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Failed allocating new GSI"))?;
 
         Ok(InterruptRoute {
             gsi,
@@ -40,7 +36,7 @@ impl InterruptRoute {
         })
     }
 
-    pub fn enable(&self, hypervisor: &Arc<Mutex<dyn Hypervisor>>) -> Result<()> {
+    pub fn enable(&self, hypervisor: &Arc<Mutex<KvmHypervisor>>) -> Result<()> {
         if !self.registered.load(Ordering::Acquire) {
             hypervisor
                 .lock()
@@ -60,7 +56,7 @@ impl InterruptRoute {
         Ok(())
     }
 
-    pub fn disable(&self, hypervisor: &Arc<Mutex<dyn Hypervisor>>) -> Result<()> {
+    pub fn disable(&self, hypervisor: &Arc<Mutex<KvmHypervisor>>) -> Result<()> {
         if self.registered.load(Ordering::Acquire) {
             hypervisor
                 .lock()
@@ -99,7 +95,7 @@ pub struct RoutingEntry<IrqRoutingEntry> {
 }
 
 pub struct MsiInterruptGroup<IrqRoutingEntry> {
-    hypervisor: Arc<Mutex<dyn Hypervisor>>,
+    hypervisor: Arc<Mutex<KvmHypervisor>>,
     gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
     irq_routes: HashMap<InterruptIndex, InterruptRoute>,
 }
@@ -156,7 +152,7 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
 
 impl<IrqRoutingEntry> MsiInterruptGroup<IrqRoutingEntry> {
     fn new(
-        hypervisor: Arc<Mutex<dyn Hypervisor>>,
+        hypervisor: Arc<Mutex<KvmHypervisor>>,
         gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
         irq_routes: HashMap<InterruptIndex, InterruptRoute>,
     ) -> Self {
@@ -262,15 +258,15 @@ impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
 }
 
 pub struct MsiInterruptManager<IrqRoutingEntry> {
-    allocator: Arc<Mutex<SystemAllocator>>,
-    hypervisor: Arc<Mutex<dyn Hypervisor>>,
+    allocator: Arc<Mutex<dyn SystemAllocator>>,
+    hypervisor: Arc<Mutex<KvmHypervisor>>,
     gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
 }
 
 impl MsiInterruptManager<IrqRoutingEntry> {
     pub fn new(
-        allocator: Arc<Mutex<SystemAllocator>>,
-        hypervisor: Arc<Mutex<dyn Hypervisor>>,
+        allocator: Arc<Mutex<dyn SystemAllocator>>,
+        hypervisor: Arc<Mutex<KvmHypervisor>>,
     ) -> Self {
         // Create a shared list of GSI that can be shared through all PCI
         // devices. This way, we can maintain the full list of used GSI,
@@ -297,7 +293,9 @@ impl InterruptManager for MsiInterruptManager<IrqRoutingEntry> {
         let mut irq_routes: HashMap<InterruptIndex, InterruptRoute> =
             HashMap::with_capacity(config.count as usize);
         for i in config.base..config.base + config.count {
-            irq_routes.insert(i, InterruptRoute::new(&mut allocator)?);
+            let gsi = allocator.allocate_gsi().unwrap();
+            error!("Allocating GSI {}", gsi);
+            irq_routes.insert(i, InterruptRoute::new(gsi)?);
         }
 
         Ok(Arc::new(Box::new(MsiInterruptGroup::new(

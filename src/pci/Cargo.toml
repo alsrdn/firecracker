@@ -15,6 +15,7 @@ kvm-bindings = { version = ">=0.4.0", features = ["fam-wrappers"] }
 kvm-ioctls = ">=0.8.0"
 vm-device = { git = "https://github.com/sandreim/vm-device", branch = "master"}
 vm-allocator = { path = "../vm-allocator"}
+hypervisor = { path = "../hypervisor"}
 
 [dependencies.vfio-bindings]
 version = "0.2.0"

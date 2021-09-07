@@ -16,9 +16,26 @@ pub enum Error {
     Overflow,
     Overlap,
     UnalignedAddress,
+    NotFound,
+    InvalidSize,
+    Unavailable,
 }
 
-pub type Result<T> = result::Result<T, Error>;
+pub type Result = result::Result<GuestAddress, Error>;
+
+/// Trait definition for a generic guest mem range allocator.
+pub trait AddressAllocator {
+    /// Allocate a range of memory.
+    fn allocate(
+        &mut self,
+        address: Option<GuestAddress>,
+        size: GuestUsize,
+        align_size: Option<GuestUsize>,
+    ) -> Result;
+
+    /// Free a previously allocated range.
+    fn free(&mut self, address: GuestAddress, size: GuestUsize) -> Result;
+}
 
 /// Manages allocating address ranges.
 /// Use `AddressAllocator` whenever an address range needs to be allocated to different users.
@@ -34,13 +51,13 @@ pub type Result<T> = result::Result<T, Error>;
 ///   });
 /// ```
 #[derive(Debug, Eq, PartialEq)]
-pub struct AddressAllocator {
+pub struct DefaultAddressAllocator {
     base: GuestAddress,
     end: GuestAddress,
     ranges: BTreeMap<GuestAddress, GuestUsize>,
 }
 
-impl AddressAllocator {
+impl DefaultAddressAllocator {
     /// Creates a new `AddressAllocator` for managing a range of addresses.
     /// Can return `None` if `base` + `size` overflows a u64.
     ///
@@ -53,7 +70,7 @@ impl AddressAllocator {
 
         let end = base.checked_add(size - 1)?;
 
-        let mut allocator = AddressAllocator {
+        let mut allocator = DefaultAddressAllocator {
             base,
             end,
             ranges: BTreeMap::new(),
@@ -81,7 +98,7 @@ impl AddressAllocator {
         req_address: GuestAddress,
         req_size: GuestUsize,
         alignment: GuestUsize,
-    ) -> Result<GuestAddress> {
+    ) -> Result {
         let aligned_address = self.align_address(req_address, alignment);
 
         // The requested address should be aligned.
@@ -122,11 +139,7 @@ impl AddressAllocator {
         Err(Error::Overflow)
     }
 
-    fn first_available_range(
-        &self,
-        req_size: GuestUsize,
-        alignment: GuestUsize,
-    ) -> Option<GuestAddress> {
+    fn first_available_range(&self, req_size: GuestUsize, alignment: GuestUsize) -> Result {
         let reversed_ranges: Vec<(&GuestAddress, &GuestUsize)> = self.ranges.iter().rev().collect();
 
         for (idx, (address, _size)) in reversed_ranges.iter().enumerate() {
@@ -149,39 +162,41 @@ impl AddressAllocator {
             {
                 let adjust = if alignment > 1 { alignment - 1 } else { 0 };
                 if size_delta.raw_value() >= req_size {
-                    return Some(
-                        self.align_address(address.unchecked_sub(req_size + adjust), alignment),
+                    return Ok(
+                        self.align_address(address.unchecked_sub(req_size + adjust), alignment)
                     );
                 }
             }
         }
 
-        None
+        Err(Error::Unavailable)
     }
+}
 
+impl AddressAllocator for DefaultAddressAllocator {
     /// Allocates a range of addresses from the managed region. Returns `Some(allocated_address)`
     /// when successful, or `None` if an area of `size` can't be allocated or if alignment isn't
     /// a power of two.
-    pub fn allocate(
+    fn allocate(
         &mut self,
         address: Option<GuestAddress>,
         size: GuestUsize,
         align_size: Option<GuestUsize>,
-    ) -> Option<GuestAddress> {
+    ) -> Result {
         if size == 0 {
-            return None;
+            return Err(Error::InvalidSize);
         }
 
         let alignment = align_size.unwrap_or(4);
         if !alignment.is_power_of_two() || alignment == 0 {
-            return None;
+            return Err(Error::UnalignedAddress);
         }
 
         let new_addr = match address {
             Some(req_address) => match self.available_range(req_address, size, alignment) {
                 Ok(addr) => addr,
                 Err(_) => {
-                    return None;
+                    return Err(Error::Unavailable);
                 }
             },
             None => self.first_available_range(size, alignment)?,
@@ -189,17 +204,19 @@ impl AddressAllocator {
 
         self.ranges.insert(new_addr, size);
 
-        Some(new_addr)
+        Ok(new_addr)
     }
 
     /// Free an already allocated address range.
     /// We can only free a range if it matches exactly an already allocated range.
-    pub fn free(&mut self, address: GuestAddress, size: GuestUsize) {
+    fn free(&mut self, address: GuestAddress, size: GuestUsize) -> Result {
         if let Some(&range_size) = self.ranges.get(&address) {
             if size == range_size {
                 self.ranges.remove(&address);
+                return Ok(address);
             }
         }
+        Err(Error::NotFound)
     }
 }
 

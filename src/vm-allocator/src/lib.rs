@@ -6,7 +6,7 @@
 // found in the LICENSE-BSD-3-Clause file.
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 
 //! Manages system resources that can be allocated to VMs and their devices.
 
@@ -17,8 +17,8 @@ mod address;
 mod gsi;
 mod system;
 
-pub use crate::address::AddressAllocator;
-pub use crate::gsi::GsiAllocator;
+pub use crate::address::{AddressAllocator, Error as AddressAllocatorError};
+pub use crate::gsi::{Error as GsiAllocatorError, GsiAllocator};
+
 #[cfg(target_arch = "x86_64")]
-pub use crate::gsi::GsiApic;
-pub use crate::system::SystemAllocator;
+pub use crate::system::{DefaultSystemAllocator, SystemAllocator};

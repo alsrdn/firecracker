@@ -289,6 +289,7 @@ version = "0.1.0"
 dependencies = [
  "dumbo",
  "event-manager",
+ "kvm-bindings",
  "libc",
  "logger",
  "mmds",
@@ -381,6 +382,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5aca5565f760fb5b220e499d72710ed156fdb74e631659e99377d9ebfbd13ae8"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "hypervisor"
+version = "0.1.0"
+dependencies = [
+ "vm-memory 0.4.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -559,6 +568,7 @@ name = "pci"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "hypervisor",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
@@ -1081,6 +1091,7 @@ dependencies = [
  "criterion",
  "devices",
  "event-manager",
+ "hypervisor",
  "kernel",
  "kvm-bindings",
  "kvm-ioctls",

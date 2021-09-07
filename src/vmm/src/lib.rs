@@ -66,7 +66,7 @@ use seccompiler::BpfProgram;
 use snapshot::Persist;
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
-use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
+use vm_memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
 
 /// Shorthand type for the EventManager flavour used by Firecracker.
 pub type EventManager = BaseEventManager<Arc<Mutex<dyn MutEventSubscriber>>>;
@@ -261,11 +261,11 @@ pub struct Vmm {
     pub pio_device_manager: PortIODeviceManager,
 }
 
+use hypervisor::{Hypervisor, HypervisorError};
 use kvm_bindings::{kvm_userspace_memory_region, KVM_MEM_READONLY};
-use pci::{Hypervisor, HypervisorError};
 
 /// Low level wrapper that we need to provide as backend for PCI/VFIO.
-struct KvmHypervisor {
+pub struct KvmHypervisor {
     vm_fd: kvm_ioctls::VmFd,
     // We use 1 or 2 slots depending on guest mem size.
     // Dynamic memory slots start at 16. We are going to be using these slots
@@ -274,11 +274,14 @@ struct KvmHypervisor {
 }
 
 impl Hypervisor for KvmHypervisor {
+    type IrqRouting = kvm_irq_routing;
+
     fn map_device_memory_region(
         &mut self,
         slot: u32,
         hva: u64,
-        gpa: GuestAddress,
+        // Has to match upstream vm-memory dependency.
+        gpa: vm_memory::guest_memory::GuestAddress,
         len: u64,
         readonly: bool,
     ) -> std::result::Result<(), io::Error> {

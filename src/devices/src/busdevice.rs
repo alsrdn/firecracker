@@ -8,6 +8,7 @@
 //! Rust-vmm vm-device wrappers/adapters.
 
 use crate::virtio::AsAny;
+use kvm_bindings::kvm_irq_routing;
 use vm_device::{MutDeviceMmio, MutDevicePio};
 
 /// PioDevice will implement AsAny as required to cast Bus devices
@@ -26,4 +27,4 @@ pub trait MmioDevice: MutDeviceMmio + AsAny + Send {
 
 impl crate::PioDevice for pci::PciConfigIo {}
 impl crate::MmioDevice for pci::PciConfigMmio {}
-impl crate::MmioDevice for pci::VfioPciDevice {}
+impl MmioDevice for pci::VfioPciDevice<kvm_irq_routing> {}
