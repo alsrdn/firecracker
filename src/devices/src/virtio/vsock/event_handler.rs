@@ -27,14 +27,16 @@ use std::os::unix::io::AsRawFd;
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use logger::{debug, error, warn, IncMetric, METRICS};
 use utils::epoll::EventSet;
+use vm_device::interrupt::Interrupt;
 
 use super::device::{Vsock, EVQ_INDEX, RXQ_INDEX, TXQ_INDEX};
 use super::VsockBackend;
 use crate::virtio::VirtioDevice;
 
-impl<B> Vsock<B>
+impl<B, I> Vsock<B, I>
 where
     B: VsockBackend + 'static,
+    I: Interrupt + 'static,
 {
     pub fn handle_rxq_event(&mut self, evset: EventSet) -> bool {
         debug!("vsock: RX queue event");
@@ -147,9 +149,10 @@ where
     }
 }
 
-impl<B> MutEventSubscriber for Vsock<B>
+impl<B, I> MutEventSubscriber for Vsock<B, I>
 where
     B: VsockBackend + 'static,
+    I: Interrupt + 'static,
 {
     fn process(&mut self, event: Events, ops: &mut EventOps) {
         let source = event.fd();

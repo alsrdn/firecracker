@@ -8,6 +8,7 @@ use devices::legacy::EventFdTrigger;
 use devices::legacy::SerialDevice;
 use devices::legacy::SerialEventsWrapper;
 use devices::legacy::SerialWrapper;
+use devices::InterruptSource;
 use libc::EFD_NONBLOCK;
 use logger::METRICS;
 use std::convert::TryFrom;
@@ -15,6 +16,7 @@ use std::fmt::{Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
+use vm_device::interrupt::{legacy::LegacyIrqConfig, ConfigurableInterrupt, InterruptSourceGroup};
 use vm_superio::Serial;
 
 #[cfg(target_arch = "aarch64")]
@@ -23,6 +25,7 @@ use crate::construct_kvm_mpidrs;
 use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
 use crate::device_manager::persist::MMIODevManagerConstructorArgs;
+use crate::interrupts::{KvmInterruptManager, KvmLegacyInterrupt};
 
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::elf::Elf as Loader;
@@ -254,8 +257,9 @@ fn create_vmm_and_vcpus(
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
-    let pio_device_manager = {
+    let (interrupt_manager, pio_device_manager) = {
         setup_interrupt_controller(&mut vm)?;
+        let interrupt_manager = KvmInterruptManager::new(vm.clone_fd());
         vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
 
         // Make stdout non blocking.
@@ -273,8 +277,14 @@ fn create_vmm_and_vcpus(
             .try_clone()
             .map_err(Error::EventFd)
             .map_err(Internal)?;
-        create_pio_dev_manager_with_legacy_devices(&vm, serial_device, reset_evt)
-            .map_err(Internal)?
+
+        let pio_manager = create_pio_dev_manager_with_legacy_devices(
+            serial_device,
+            reset_evt,
+            &interrupt_manager,
+        )
+        .map_err(Internal)?;
+        (interrupt_manager, pio_manager)
     };
 
     // On aarch64, the vCPUs need to be created (i.e call KVM_CREATE_VCPU) before setting up the
@@ -282,10 +292,11 @@ fn create_vmm_and_vcpus(
     // was already initialized.
     // Search for `kvm_arch_vcpu_create` in arch/arm/kvm/arm.c.
     #[cfg(target_arch = "aarch64")]
-    {
+    let interrupt_manager = {
         vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
         setup_interrupt_controller(&mut vm, vcpu_count)?;
-    }
+        KvmInterruptManager::new(vm.clone_fd())
+    };
 
     let vmm = Vmm {
         events_observer: Some(Box::new(SerialStdin::get())),
@@ -298,6 +309,7 @@ fn create_vmm_and_vcpus(
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
+        interrupt_manager: Arc::new(interrupt_manager),
     };
 
     Ok((vmm, vcpus))
@@ -705,13 +717,12 @@ pub fn setup_serial_device(
     event_manager: &mut EventManager,
     input: Box<dyn ReadableFd + Send>,
     out: Box<dyn io::Write + Send>,
-) -> super::Result<Arc<Mutex<SerialDevice>>> {
-    let interrupt_evt = EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?);
+) -> super::Result<Arc<Mutex<SerialDevice<KvmLegacyInterrupt>>>> {
     let kick_stdin_read_evt =
         EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?);
     let serial = Arc::new(Mutex::new(SerialWrapper {
         serial: Serial::with_events(
-            interrupt_evt,
+            None,
             SerialEventsWrapper {
                 metrics: METRICS.uart.clone(),
                 buffer_ready_event_fd: Some(kick_stdin_read_evt),
@@ -733,15 +744,13 @@ pub fn setup_rtc_device() -> Arc<Mutex<RTCDevice>> {
 
 #[cfg(target_arch = "x86_64")]
 fn create_pio_dev_manager_with_legacy_devices(
-    vm: &Vm,
-    serial: Arc<Mutex<SerialDevice>>,
+    serial: Arc<Mutex<SerialDevice<KvmLegacyInterrupt>>>,
     i8042_reset_evfd: EventFd,
+    interrupt_manager: &KvmInterruptManager,
 ) -> std::result::Result<PortIODeviceManager, super::Error> {
-    let mut pio_dev_mgr =
-        PortIODeviceManager::new(serial, i8042_reset_evfd).map_err(Error::CreateLegacyDevice)?;
-    pio_dev_mgr
-        .register_devices(vm.fd())
-        .map_err(Error::LegacyIOBus)?;
+    let mut pio_dev_mgr = PortIODeviceManager::new(serial, i8042_reset_evfd, interrupt_manager)
+        .map_err(Error::CreateLegacyDevice)?;
+    pio_dev_mgr.register_devices().map_err(Error::LegacyIOBus)?;
     Ok(pio_dev_mgr)
 }
 
@@ -857,7 +866,9 @@ pub fn configure_system_for_boot(
 }
 
 /// Attaches a VirtioDevice device to the device manager and event manager.
-fn attach_virtio_device<T: 'static + VirtioDevice + MutEventSubscriber>(
+fn attach_virtio_device<
+    T: 'static + VirtioDevice + MutEventSubscriber + InterruptSource<IrqType = KvmLegacyInterrupt>,
+>(
     event_manager: &mut EventManager,
     vmm: &mut Vmm,
     id: String,
@@ -868,12 +879,41 @@ fn attach_virtio_device<T: 'static + VirtioDevice + MutEventSubscriber>(
 
     event_manager.add_subscriber(device.clone());
 
+    let mut interrupt_group = vmm.interrupt_manager.get_new_legacy_group().unwrap();
+    interrupt_group.allocate_interrupts(1).unwrap();
+    let irq = interrupt_group.get(0).unwrap();
+    irq.update(&LegacyIrqConfig {
+        interrupt_line: None,
+        interrupt_pin: None,
+    })
+    .unwrap();
+    let irq_config = irq.get_config().unwrap();
+    interrupt_group.enable().unwrap();
+    {
+        let mut locked_device = device.lock().expect("fail");
+        locked_device.set_interrupt_group(Arc::new(Mutex::new(interrupt_group)));
+    }
+
     // The device mutex mustn't be locked here otherwise it will deadlock.
     let device = MmioTransport::new(vmm.guest_memory().clone(), device);
+
+    let mmio_slot = vmm
+        .mmio_device_manager
+        .allocate_new_slot(1)
+        .map_err(RegisterMmioDevice)?;
     vmm.mmio_device_manager
-        .register_mmio_virtio_for_boot(vmm.vm.fd(), id, device, cmdline)
-        .map_err(RegisterMmioDevice)
-        .map(|_| ())
+        .register_mmio_virtio(vmm.vm.fd(), id, device, &mmio_slot)
+        .map_err(RegisterMmioDevice)?;
+    #[cfg(target_arch = "x86_64")]
+    if let Some(interrupt_line) = irq_config.interrupt_line {
+        MMIODeviceManager::add_virtio_device_to_cmdline(cmdline, &mmio_slot, interrupt_line)
+            .map_err(RegisterMmioDevice)?;
+    } else {
+        return Err(StartMicrovmError::KernelCmdline(
+            "Can't assign interrupt number".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn attach_boot_timer_device(
@@ -894,7 +934,7 @@ pub(crate) fn attach_boot_timer_device(
 fn attach_block_devices<'a>(
     vmm: &mut Vmm,
     cmdline: &mut LoaderKernelCmdline,
-    blocks: impl Iterator<Item = &'a Arc<Mutex<Block>>>,
+    blocks: impl Iterator<Item = &'a Arc<Mutex<Block<KvmLegacyInterrupt>>>>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
     for block in blocks {
@@ -922,7 +962,7 @@ fn attach_block_devices<'a>(
 fn attach_net_devices<'a>(
     vmm: &mut Vmm,
     cmdline: &mut LoaderKernelCmdline,
-    net_devices: impl Iterator<Item = &'a Arc<Mutex<Net>>>,
+    net_devices: impl Iterator<Item = &'a Arc<Mutex<Net<KvmLegacyInterrupt>>>>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
     for net_device in net_devices {
@@ -936,7 +976,7 @@ fn attach_net_devices<'a>(
 fn attach_unixsock_vsock_device(
     vmm: &mut Vmm,
     cmdline: &mut LoaderKernelCmdline,
-    unix_vsock: &Arc<Mutex<Vsock<VsockUnixBackend>>>,
+    unix_vsock: &Arc<Mutex<Vsock<VsockUnixBackend, KvmLegacyInterrupt>>>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
     let id = String::from(unix_vsock.lock().expect("Poisoned lock").id());
@@ -947,7 +987,7 @@ fn attach_unixsock_vsock_device(
 fn attach_balloon_device(
     vmm: &mut Vmm,
     cmdline: &mut LoaderKernelCmdline,
-    balloon: &Arc<Mutex<Balloon>>,
+    balloon: &Arc<Mutex<Balloon<KvmLegacyInterrupt>>>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
     let id = String::from(balloon.lock().expect("Poisoned lock").id());

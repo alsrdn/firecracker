@@ -13,6 +13,7 @@ use snapshot::Persist;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
+use vm_device::interrupt::Interrupt;
 use vm_memory::GuestMemoryMmap;
 
 use super::device::{ConfigSpace, Net};
@@ -50,7 +51,10 @@ pub enum Error {
     VirtioState(VirtioStateError),
 }
 
-impl Persist<'_> for Net {
+impl<I> Persist<'_> for Net<I>
+where
+    I: Interrupt + 'static,
+{
     type State = NetState;
     type ConstructorArgs = NetConstructorArgs;
     type Error = Error;

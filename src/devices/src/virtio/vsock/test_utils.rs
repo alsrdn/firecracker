@@ -14,6 +14,7 @@ use crate::virtio::{
 };
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
+use vm_device::interrupt::Interrupt;
 use vm_memory::{GuestAddress, GuestMemoryMmap};
 
 type Result<T> = std::result::Result<T, VsockError>;
@@ -109,14 +110,14 @@ impl VsockEpollListener for TestBackend {
 }
 impl VsockBackend for TestBackend {}
 
-pub struct TestContext {
+pub struct TestContext<I> {
     pub cid: u64,
     pub mem: GuestMemoryMmap,
     pub mem_size: usize,
-    pub device: Vsock<TestBackend>,
+    pub device: Vsock<TestBackend, I>,
 }
 
-impl TestContext {
+impl<I: Interrupt> TestContext<I> {
     pub fn new() -> Self {
         const CID: u64 = 52;
         const MEM_SIZE: usize = 1024 * 1024 * 128;
@@ -131,7 +132,7 @@ impl TestContext {
         }
     }
 
-    pub fn create_event_handler_context(&self) -> EventHandlerContext {
+    pub fn create_event_handler_context(&self) -> EventHandlerContext<I> {
         const QSIZE: u16 = 256;
 
         let guest_rxvq = GuestQ::new(GuestAddress(0x0010_0000), &self.mem, QSIZE as u16);
@@ -169,20 +170,20 @@ impl TestContext {
     }
 }
 
-impl Default for TestContext {
+impl<I: Interrupt> Default for TestContext<I> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct EventHandlerContext<'a> {
-    pub device: Vsock<TestBackend>,
+pub struct EventHandlerContext<'a, I> {
+    pub device: Vsock<TestBackend, I>,
     pub guest_rxvq: GuestQ<'a>,
     pub guest_txvq: GuestQ<'a>,
     pub guest_evvq: GuestQ<'a>,
 }
 
-impl<'a> EventHandlerContext<'a> {
+impl<'a, I: Interrupt + 'static> EventHandlerContext<'a, I> {
     pub fn mock_activate(&mut self, mem: GuestMemoryMmap) {
         // Artificially activate the device.
         self.device.activate(mem).unwrap();
@@ -198,18 +199,19 @@ impl<'a> EventHandlerContext<'a> {
     }
 }
 
-impl<B> Vsock<B>
+impl<B, I> Vsock<B, I>
 where
     B: VsockBackend,
+    I: Interrupt,
 {
-    pub fn write_element_in_queue(vsock: &Vsock<B>, idx: usize, val: u64) {
+    pub fn write_element_in_queue(vsock: &Vsock<B, I>, idx: usize, val: u64) {
         if idx > vsock.queue_events.len() - 1 {
             panic!("Index bigger than the number of queues of this device");
         }
         vsock.queue_events[idx].write(val).unwrap();
     }
 
-    pub fn get_element_from_interest_list(vsock: &Vsock<B>, idx: usize) -> u64 {
+    pub fn get_element_from_interest_list(vsock: &Vsock<B, I>, idx: usize) -> u64 {
         match idx {
             0..=2 => vsock.queue_events[idx].as_raw_fd() as u64,
             3 => vsock.backend.as_raw_fd() as u64,

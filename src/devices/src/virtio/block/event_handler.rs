@@ -8,8 +8,12 @@ use utils::epoll::EventSet;
 
 use crate::virtio::block::device::Block;
 use crate::virtio::VirtioDevice;
+use vm_device::interrupt::Interrupt;
 
-impl Block {
+impl<I> Block<I>
+where
+    I: Interrupt + 'static,
+{
     fn register_runtime_events(&self, ops: &mut EventOps) {
         if let Err(e) = ops.add(Events::new(&self.queue_evts[0], EventSet::IN)) {
             error!("Failed to register queue event: {}", e);
@@ -37,7 +41,10 @@ impl Block {
     }
 }
 
-impl MutEventSubscriber for Block {
+impl<I> MutEventSubscriber for Block<I>
+where
+    I: Interrupt + 'static,
+{
     // Handle an event for queue or rate limiter.
     fn process(&mut self, event: Events, ops: &mut EventOps) {
         let source = event.fd();

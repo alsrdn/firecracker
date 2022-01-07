@@ -10,6 +10,7 @@ use super::*;
 use snapshot::Persist;
 use versionize::{VersionMap, Versionize, VersionizeError, VersionizeResult};
 use versionize_derive::Versionize;
+use vm_device::interrupt::Interrupt;
 use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::persist::VirtioDeviceState;
@@ -81,9 +82,10 @@ impl Persist<'_> for VsockUnixBackend {
     }
 }
 
-impl<B> Persist<'_> for Vsock<B>
+impl<B, I> Persist<'_> for Vsock<B, I>
 where
     B: VsockBackend + 'static,
+    I: Interrupt + 'static,
 {
     type State = VsockFrontendState;
     type ConstructorArgs = VsockConstructorArgs<B>;

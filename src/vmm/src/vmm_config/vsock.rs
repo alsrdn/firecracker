@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use devices::virtio::{Vsock, VsockError, VsockUnixBackend, VsockUnixBackendError};
 
+use crate::interrupts::KvmLegacyInterrupt;
 use serde::{Deserialize, Serialize};
 
-type MutexVsockUnix = Arc<Mutex<Vsock<VsockUnixBackend>>>;
+type MutexVsockUnix = Arc<Mutex<Vsock<VsockUnixBackend, KvmLegacyInterrupt>>>;
 
 /// Errors associated with `NetworkInterfaceConfig`.
 #[derive(Debug)]
@@ -99,7 +100,9 @@ impl VsockBuilder {
     }
 
     /// Creates a Vsock device from a VsockDeviceConfig.
-    pub fn create_unixsock_vsock(cfg: VsockDeviceConfig) -> Result<Vsock<VsockUnixBackend>> {
+    pub fn create_unixsock_vsock(
+        cfg: VsockDeviceConfig,
+    ) -> Result<Vsock<VsockUnixBackend, KvmLegacyInterrupt>> {
         let backend = VsockUnixBackend::new(u64::from(cfg.guest_cid), cfg.uds_path)
             .map_err(VsockConfigError::CreateVsockBackend)?;
 

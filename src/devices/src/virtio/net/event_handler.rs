@@ -6,11 +6,15 @@ use std::os::unix::io::AsRawFd;
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use logger::{debug, error, warn, IncMetric, METRICS};
 use utils::epoll::EventSet;
+use vm_device::interrupt::Interrupt;
 
 use crate::virtio::net::device::Net;
 use crate::virtio::{VirtioDevice, RX_INDEX, TX_INDEX};
 
-impl Net {
+impl<I> Net<I>
+where
+    I: Interrupt + 'static,
+{
     fn register_runtime_events(&self, ops: &mut EventOps) {
         if let Err(e) = ops.add(Events::new(&self.queue_evts[RX_INDEX], EventSet::IN)) {
             error!("Failed to register rx queue event: {}", e);
@@ -50,7 +54,10 @@ impl Net {
     }
 }
 
-impl MutEventSubscriber for Net {
+impl<I> MutEventSubscriber for Net<I>
+where
+    I: Interrupt + 'static,
+{
     fn process(&mut self, event: Events, ops: &mut EventOps) {
         let source = event.fd();
         let event_set = event.event_set();

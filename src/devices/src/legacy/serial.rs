@@ -13,10 +13,10 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::result;
 use std::sync::Arc;
+use vm_device::interrupt::Interrupt;
 use vm_superio::serial::Error as SerialError;
 use vm_superio::serial::SerialEvents;
 use vm_superio::Serial;
-use vm_superio::Trigger;
 
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use logger::{error, warn, IncMetric};
@@ -31,7 +31,7 @@ pub trait ReadableFd: io::Read + AsRawFd {}
 
 #[derive(Debug)]
 pub enum RawIOError {
-    Serial(SerialError<io::Error>),
+    Serial(SerialError),
 }
 
 pub trait RawIOHandler {
@@ -39,7 +39,7 @@ pub trait RawIOHandler {
     fn raw_input(&mut self, _data: &[u8]) -> result::Result<(), RawIOError>;
 }
 
-impl<EV: SerialEvents, W: Write> RawIOHandler for Serial<EventFdTrigger, EV, W> {
+impl<I: Interrupt, EV: SerialEvents, W: Write> RawIOHandler for Serial<I, EV, W> {
     // This is not used for anything and is basically just a dummy implementation for `raw_input`.
     fn raw_input(&mut self, data: &[u8]) -> result::Result<(), RawIOError> {
         // Fail fast if the serial is serviced with more data than it can buffer.
@@ -89,12 +89,12 @@ impl SerialEvents for SerialEventsWrapper {
     }
 }
 
-pub struct SerialWrapper<T: Trigger, EV: SerialEvents, W: Write> {
-    pub serial: Serial<T, EV, W>,
+pub struct SerialWrapper<I: Interrupt, EV: SerialEvents, W: Write> {
+    pub serial: Serial<I, EV, W>,
     pub input: Option<Box<dyn ReadableFd + Send>>,
 }
 
-impl<W: Write> SerialWrapper<EventFdTrigger, SerialEventsWrapper, W> {
+impl<I: Interrupt, W: Write> SerialWrapper<I, SerialEventsWrapper, W> {
     fn handle_ewouldblock(&self, ops: &mut EventOps) {
         let buffer_ready_fd = self.buffer_ready_evt_fd();
         let input_fd = self.serial_input_fd();
@@ -159,13 +159,16 @@ impl<W: Write> SerialWrapper<EventFdTrigger, SerialEventsWrapper, W> {
             .as_ref()
             .map_or(Ok(0), |buf_ready| buf_ready.read())
     }
+
+    pub fn set_interrupt_evt(&mut self, evt: Arc<I>) {
+        self.serial.set_interrupt_evt(evt);
+    }
 }
 
-pub type SerialDevice =
-    SerialWrapper<EventFdTrigger, SerialEventsWrapper, Box<dyn io::Write + Send>>;
+pub type SerialDevice<I> = SerialWrapper<I, SerialEventsWrapper, Box<dyn io::Write + Send>>;
 
-impl<W: std::io::Write> MutEventSubscriber
-    for SerialWrapper<EventFdTrigger, SerialEventsWrapper, W>
+impl<I: Interrupt, W: std::io::Write> MutEventSubscriber
+    for SerialWrapper<I, SerialEventsWrapper, W>
 {
     /// Handle events on the serial input fd.
     fn process(&mut self, event: Events, ops: &mut EventOps) {
@@ -250,8 +253,8 @@ impl<W: std::io::Write> MutEventSubscriber
     }
 }
 
-impl<W: Write + Send + 'static> BusDevice
-    for SerialWrapper<EventFdTrigger, SerialEventsWrapper, W>
+impl<I: 'static + Interrupt + Send + Sync, W: Write + Send + 'static> BusDevice
+    for SerialWrapper<I, SerialEventsWrapper, W>
 {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
         if data.len() != 1 {

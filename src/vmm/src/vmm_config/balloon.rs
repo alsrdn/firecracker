@@ -9,9 +9,11 @@ use devices::virtio::balloon::Error as BalloonError;
 pub use devices::virtio::BALLOON_DEV_ID;
 use devices::virtio::{Balloon, BalloonConfig};
 
+use crate::interrupts::KvmLegacyInterrupt;
+
 use serde::{Deserialize, Serialize};
 
-type MutexBalloon = Arc<Mutex<Balloon>>;
+type MutexBalloon = Arc<Mutex<Balloon<KvmLegacyInterrupt>>>;
 
 /// Errors associated with the operations allowed on the balloon.
 #[derive(Debug)]

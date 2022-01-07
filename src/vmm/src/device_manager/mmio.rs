@@ -31,6 +31,8 @@ use logger::info;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 
+use crate::interrupts::KvmLegacyInterrupt;
+
 /// Errors for MMIO device manager.
 #[derive(Debug)]
 pub enum Error {
@@ -156,7 +158,7 @@ impl MMIODeviceManager {
     }
 
     /// Allocates resources for a new device to be added.
-    fn allocate_new_slot(&mut self, irq_count: u32) -> Result<MMIODeviceInfo> {
+    pub fn allocate_new_slot(&mut self, irq_count: u32) -> Result<MMIODeviceInfo> {
         let irqs = self.irqs.get(irq_count)?;
         let slot = MMIODeviceInfo {
             addr: self.next_avail_mmio,
@@ -212,8 +214,6 @@ impl MMIODeviceManager {
                 vm.register_ioevent(queue_evt, &io_addr, i as u32)
                     .map_err(Error::RegisterIoEvent)?;
             }
-            vm.register_irqfd(locked_device.interrupt_evt(), slot.irqs[0])
-                .map_err(Error::RegisterIrqFd)?;
         }
 
         self.register_mmio_device(identifier, slot.clone(), Arc::new(Mutex::new(mmio_device)))
@@ -224,6 +224,7 @@ impl MMIODeviceManager {
     pub fn add_virtio_device_to_cmdline(
         cmdline: &mut kernel_cmdline::Cmdline,
         slot: &MMIODeviceInfo,
+        interrupt_line: u32,
     ) -> Result<()> {
         // as per doc, [virtio_mmio.]device=<size>@<baseaddr>:<irq> needs to be appended
         // to kernel commandline for virtio mmio devices to get recognized
@@ -231,24 +232,8 @@ impl MMIODeviceManager {
         // bytes to 1024; further, the '{}' formatting rust construct will automatically
         // transform it to decimal
         cmdline
-            .add_virtio_mmio_device(slot.len, GuestAddress(slot.addr), slot.irqs[0], None)
+            .add_virtio_mmio_device(slot.len, GuestAddress(slot.addr), interrupt_line, None)
             .map_err(Error::Cmdline)
-    }
-
-    /// Allocate slot and register an already created virtio-over-MMIO device. Also Adds the device
-    /// to the boot cmdline.
-    pub fn register_mmio_virtio_for_boot(
-        &mut self,
-        vm: &VmFd,
-        device_id: String,
-        mmio_device: MmioTransport,
-        _cmdline: &mut kernel_cmdline::Cmdline,
-    ) -> Result<MMIODeviceInfo> {
-        let mmio_slot = self.allocate_new_slot(1)?;
-        self.register_mmio_virtio(vm, device_id, mmio_device, &mmio_slot)?;
-        #[cfg(target_arch = "x86_64")]
-        Self::add_virtio_device_to_cmdline(_cmdline, &mmio_slot)?;
-        Ok(mmio_slot)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -423,7 +408,10 @@ impl MMIODeviceManager {
             let mut virtio = dev.lock().expect("Poisoned lock");
             match virtio_type {
                 TYPE_BALLOON => {
-                    let balloon = virtio.as_mut_any().downcast_mut::<Balloon>().unwrap();
+                    let balloon = virtio
+                        .as_mut_any()
+                        .downcast_mut::<Balloon<KvmLegacyInterrupt>>()
+                        .unwrap();
                     // If device is activated, kick the balloon queue(s) to make up for any
                     // pending or in-flight epoll events we may have not captured in snapshot.
                     // Stats queue doesn't need kicking as it is notified via a `timer_fd`.
@@ -433,7 +421,10 @@ impl MMIODeviceManager {
                     }
                 }
                 TYPE_BLOCK => {
-                    let block = virtio.as_mut_any().downcast_mut::<Block>().unwrap();
+                    let block = virtio
+                        .as_mut_any()
+                        .downcast_mut::<Block<KvmLegacyInterrupt>>()
+                        .unwrap();
                     // If device is activated, kick the block queue(s) to make up for any
                     // pending or in-flight epoll events we may have not captured in snapshot.
                     // No need to kick Ratelimiters because they are restored 'unblocked' so
@@ -444,7 +435,10 @@ impl MMIODeviceManager {
                     }
                 }
                 TYPE_NET => {
-                    let net = virtio.as_mut_any().downcast_mut::<Net>().unwrap();
+                    let net = virtio
+                        .as_mut_any()
+                        .downcast_mut::<Net<KvmLegacyInterrupt>>()
+                        .unwrap();
                     // If device is activated, kick the net queue(s) to make up for any
                     // pending or in-flight epoll events we may have not captured in snapshot.
                     // No need to kick Ratelimiters because they are restored 'unblocked' so

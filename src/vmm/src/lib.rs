@@ -8,11 +8,12 @@
 //! Virtual Machine Monitor that leverages the Linux Kernel-based Virtual Machine (KVM),
 //! and other virtualization features to run a single lightweight micro-virtual
 //! machine (microVM).
-#![deny(missing_docs)]
+//#![deny(missing_docs)]
 
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
+pub mod interrupts;
 pub mod memory_snapshot;
 /// Save/restore utilities.
 pub mod persist;
@@ -43,6 +44,7 @@ use std::time::Duration;
 #[cfg(target_arch = "x86_64")]
 use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
+use crate::interrupts::{KvmInterruptManager, KvmLegacyInterrupt};
 use crate::memory_snapshot::SnapshotMemory;
 use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
 use crate::vmm_config::instance_info::{InstanceInfo, VmState};
@@ -250,6 +252,7 @@ pub struct Vmm {
     mmio_device_manager: MMIODeviceManager,
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
+    interrupt_manager: Arc<KvmInterruptManager>,
 }
 
 impl Vmm {
@@ -517,11 +520,15 @@ impl Vmm {
     /// We update the disk image on the device and its virtio configuration.
     pub fn update_block_device_path(&mut self, drive_id: &str, path_on_host: String) -> Result<()> {
         self.mmio_device_manager
-            .with_virtio_device_with_id(TYPE_BLOCK, drive_id, |block: &mut Block| {
-                block
-                    .update_disk_image(path_on_host)
-                    .map_err(|e| e.to_string())
-            })
+            .with_virtio_device_with_id(
+                TYPE_BLOCK,
+                drive_id,
+                |block: &mut Block<KvmLegacyInterrupt>| {
+                    block
+                        .update_disk_image(path_on_host)
+                        .map_err(|e| e.to_string())
+                },
+            )
             .map_err(Error::DeviceManager)
     }
 
@@ -533,10 +540,14 @@ impl Vmm {
         rl_ops: BucketUpdate,
     ) -> Result<()> {
         self.mmio_device_manager
-            .with_virtio_device_with_id(TYPE_BLOCK, drive_id, |block: &mut Block| {
-                block.update_rate_limiter(rl_bytes, rl_ops);
-                Ok(())
-            })
+            .with_virtio_device_with_id(
+                TYPE_BLOCK,
+                drive_id,
+                |block: &mut Block<KvmLegacyInterrupt>| {
+                    block.update_rate_limiter(rl_bytes, rl_ops);
+                    Ok(())
+                },
+            )
             .map_err(Error::DeviceManager)
     }
 
@@ -550,7 +561,7 @@ impl Vmm {
         tx_ops: BucketUpdate,
     ) -> Result<()> {
         self.mmio_device_manager
-            .with_virtio_device_with_id(TYPE_NET, net_id, |net: &mut Net| {
+            .with_virtio_device_with_id(TYPE_NET, net_id, |net: &mut Net<KvmLegacyInterrupt>| {
                 net.patch_rate_limiters(rx_bytes, rx_ops, tx_bytes, tx_ops);
                 Ok(())
             })
@@ -574,7 +585,7 @@ impl Vmm {
                 .lock()
                 .expect("Poisoned lock")
                 .as_mut_any()
-                .downcast_mut::<Balloon>()
+                .downcast_mut::<Balloon<KvmLegacyInterrupt>>()
                 .unwrap()
                 .config();
 
@@ -601,7 +612,7 @@ impl Vmm {
                 .lock()
                 .expect("Poisoned lock")
                 .as_mut_any()
-                .downcast_mut::<Balloon>()
+                .downcast_mut::<Balloon<KvmLegacyInterrupt>>()
                 .unwrap()
                 .latest_stats()
                 .ok_or(BalloonError::StatisticsDisabled)
@@ -640,7 +651,7 @@ impl Vmm {
                     .lock()
                     .expect("Poisoned lock")
                     .as_mut_any()
-                    .downcast_mut::<Balloon>()
+                    .downcast_mut::<Balloon<KvmLegacyInterrupt>>()
                     .unwrap()
                     .update_size(amount_mib)?;
 
@@ -672,7 +683,7 @@ impl Vmm {
                     .lock()
                     .expect("Poisoned lock")
                     .as_mut_any()
-                    .downcast_mut::<Balloon>()
+                    .downcast_mut::<Balloon<KvmLegacyInterrupt>>()
                     .unwrap()
                     .update_stats_polling_interval(stats_polling_interval_s)?;
             }
@@ -724,6 +735,11 @@ impl Vmm {
 
         // Break the main event loop, propagating the Vmm exit-code.
         self.shutdown_exit_code = Some(exit_code);
+    }
+
+    /// Returns the interrupt manager used by this VMM
+    pub fn get_interrupt_manager(&self) -> Arc<KvmInterruptManager> {
+        self.interrupt_manager.clone()
     }
 }
 
