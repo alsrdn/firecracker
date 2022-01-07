@@ -8,9 +8,10 @@ use crate::virtio::IrqType;
 use crate::virtio::{Block, CacheType, Queue};
 use rate_limiter::RateLimiter;
 use utils::tempfile::TempFile;
+use vm_device::interrupt::Interrupt;
 
 /// Create a default Block instance to be used in tests.
-pub fn default_block() -> Block {
+pub fn default_block<I: Interrupt + 'static>() -> Block<I> {
     // Create backing file.
     let f = TempFile::new().unwrap();
     f.as_file().set_len(0x1000).unwrap();
@@ -19,7 +20,7 @@ pub fn default_block() -> Block {
 }
 
 /// Create a default Block instance using file at the specified path to be used in tests.
-pub fn default_block_with_path(path: String) -> Block {
+pub fn default_block_with_path<I: Interrupt + 'static>(path: String) -> Block<I> {
     // Rate limiting is enabled but with a high operation rate (10 million ops/s).
     let rate_limiter = RateLimiter::new(0, 0, 0, 100_000, 0, 10).unwrap();
 
@@ -37,15 +38,15 @@ pub fn default_block_with_path(path: String) -> Block {
     .unwrap()
 }
 
-pub fn set_queue(blk: &mut Block, idx: usize, q: Queue) {
+pub fn set_queue<I: Interrupt>(blk: &mut Block<I>, idx: usize, q: Queue) {
     blk.queues[idx] = q;
 }
 
-pub fn set_rate_limiter(blk: &mut Block, rl: RateLimiter) {
+pub fn set_rate_limiter<I: Interrupt>(blk: &mut Block<I>, rl: RateLimiter) {
     blk.rate_limiter = rl;
 }
 
-pub fn rate_limiter(blk: &mut Block) -> &RateLimiter {
+pub fn rate_limiter<I: Interrupt>(blk: &mut Block<I>) -> &RateLimiter {
     &blk.rate_limiter
 }
 

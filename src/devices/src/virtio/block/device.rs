@@ -13,12 +13,13 @@ use std::os::linux::fs::MetadataExt;
 use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use logger::{error, warn, IncMetric, METRICS};
 use rate_limiter::{BucketUpdate, RateLimiter};
 use utils::eventfd::EventFd;
 use virtio_gen::virtio_blk::*;
+use vm_device::interrupt::Interrupt;
 use vm_memory::GuestMemoryMmap;
 
 use super::{
@@ -28,6 +29,7 @@ use super::{
 };
 
 use crate::virtio::{IrqTrigger, IrqType};
+use crate::{InterruptSource, SharedInterruptGroup};
 
 use serde::{Deserialize, Serialize};
 use virtio_gen::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
@@ -179,7 +181,7 @@ impl Drop for DiskProperties {
 }
 
 /// Virtio device for exposing block level read/write operations on a host file.
-pub struct Block {
+pub struct Block<I: Interrupt> {
     // Host file and properties.
     pub(crate) disk: DiskProperties,
 
@@ -194,6 +196,7 @@ pub struct Block {
     pub(crate) queue_evts: [EventFd; 1],
     pub(crate) device_state: DeviceState,
     pub(crate) irq_trigger: IrqTrigger,
+    pub(crate) interrupt_group: Option<Arc<Mutex<SharedInterruptGroup<I>>>>,
 
     // Implementation specific fields.
     pub(crate) id: String,
@@ -202,7 +205,10 @@ pub struct Block {
     pub(crate) rate_limiter: RateLimiter,
 }
 
-impl Block {
+impl<I> Block<I>
+where
+    I: Interrupt + 'static,
+{
     /// Create a new virtio block device that operates on the given file.
     ///
     /// The given file must be seekable and sizable.
@@ -214,7 +220,7 @@ impl Block {
         is_disk_read_only: bool,
         is_disk_root: bool,
         rate_limiter: RateLimiter,
-    ) -> io::Result<Block> {
+    ) -> io::Result<Block<I>> {
         let disk_properties = DiskProperties::new(disk_image_path, is_disk_read_only, cache_type)?;
 
         let mut avail_features = (1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_RING_F_EVENT_IDX);
@@ -244,6 +250,7 @@ impl Block {
             queues,
             device_state: DeviceState::Inactive,
             irq_trigger: IrqTrigger::new()?,
+            interrupt_group: None,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK)?,
         })
     }
@@ -385,7 +392,26 @@ impl Block {
     }
 }
 
-impl VirtioDevice for Block {
+impl<I> InterruptSource for Block<I>
+where
+    I: Interrupt<NotifierType = EventFd> + 'static,
+{
+    type IrqType = I;
+
+    fn set_interrupt_group(&mut self, group: Arc<Mutex<SharedInterruptGroup<I>>>) {
+        self.interrupt_group = Some(group.clone());
+        let irq_group = group.lock().unwrap();
+        let irq = irq_group.get(0 as usize).unwrap();
+        if let Some(evt) = irq.notifier() {
+            self.irq_trigger.irq_evt = evt;
+        }
+    }
+}
+
+impl<I> VirtioDevice for Block<I>
+where
+    I: Interrupt + 'static,
+{
     fn device_type(&self) -> u32 {
         TYPE_BLOCK
     }

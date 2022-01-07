@@ -12,6 +12,7 @@ use snapshot::Persist;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 
+use vm_device::interrupt::Interrupt;
 use vm_memory::GuestMemoryMmap;
 
 use super::*;
@@ -92,7 +93,10 @@ pub struct BalloonConstructorArgs {
     pub mem: GuestMemoryMmap,
 }
 
-impl Persist<'_> for Balloon {
+impl<I> Persist<'_> for Balloon<I>
+where
+    I: Interrupt + 'static,
+{
     type State = BalloonState;
     type ConstructorArgs = BalloonConstructorArgs;
     type Error = super::Error;

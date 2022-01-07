@@ -21,11 +21,12 @@ use std::result;
 /// - an event queue FD; and
 /// - a backend FD.
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use logger::{debug, error, warn, IncMetric, METRICS};
 use utils::byte_order;
 use utils::eventfd::EventFd;
+use vm_device::interrupt::Interrupt;
 use vm_memory::{Bytes, GuestMemoryMmap};
 
 use super::super::super::Error as DeviceError;
@@ -37,6 +38,7 @@ use crate::virtio::{
     ActivateError, ActivateResult, DeviceState, IrqTrigger, IrqType, Queue as VirtQueue,
     VirtioDevice, VsockError,
 };
+use crate::{InterruptSource, SharedInterruptGroup};
 
 pub(crate) const RXQ_INDEX: usize = 0;
 pub(crate) const TXQ_INDEX: usize = 1;
@@ -51,7 +53,7 @@ pub(crate) const VIRTIO_VSOCK_EVENT_TRANSPORT_RESET: u32 = 0;
 pub(crate) const AVAIL_FEATURES: u64 =
     1 << uapi::VIRTIO_F_VERSION_1 as u64 | 1 << uapi::VIRTIO_F_IN_ORDER as u64;
 
-pub struct Vsock<B> {
+pub struct Vsock<B, I> {
     cid: u64,
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
@@ -59,6 +61,7 @@ pub struct Vsock<B> {
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     pub(crate) irq_trigger: IrqTrigger,
+    pub(crate) interrupt_group: Option<Arc<Mutex<SharedInterruptGroup<I>>>>,
     // This EventFd is the only one initially registered for a vsock device, and is used to convert
     // a VirtioDevice::activate call into an EventHandler read event which allows the other events
     // (queue and backend related) to be registered post virtio device activation. That's
@@ -73,11 +76,12 @@ pub struct Vsock<B> {
 //    can unregister any EPOLLIN listeners, since otherwise it will keep spinning, unable to consume
 //    its EPOLLIN events.
 
-impl<B> Vsock<B>
+impl<B, I> Vsock<B, I>
 where
     B: VsockBackend,
+    I: Interrupt,
 {
-    pub fn with_queues(cid: u64, backend: B, queues: Vec<VirtQueue>) -> super::Result<Vsock<B>> {
+    pub fn with_queues(cid: u64, backend: B, queues: Vec<VirtQueue>) -> super::Result<Vsock<B, I>> {
         let mut queue_events = Vec::new();
         for _ in 0..queues.len() {
             queue_events.push(EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?);
@@ -91,13 +95,14 @@ where
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
             irq_trigger: IrqTrigger::new().map_err(VsockError::EventFd)?,
+            interrupt_group: None,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?,
             device_state: DeviceState::Inactive,
         })
     }
 
     /// Create a new virtio-vsock device with the given VM CID and vsock backend.
-    pub fn new(cid: u64, backend: B) -> super::Result<Vsock<B>> {
+    pub fn new(cid: u64, backend: B) -> super::Result<Vsock<B, I>> {
         let queues: Vec<VirtQueue> = defs::QUEUE_SIZES
             .iter()
             .map(|&max_size| VirtQueue::new(max_size))
@@ -246,9 +251,27 @@ where
     }
 }
 
-impl<B> VirtioDevice for Vsock<B>
+impl<B, I> InterruptSource for Vsock<B, I>
 where
     B: VsockBackend + 'static,
+    I: Interrupt<NotifierType = EventFd> + 'static,
+{
+    type IrqType = I;
+
+    fn set_interrupt_group(&mut self, group: Arc<Mutex<SharedInterruptGroup<I>>>) {
+        self.interrupt_group = Some(group.clone());
+        let irq_group = group.lock().unwrap();
+        let irq = irq_group.get(0 as usize).unwrap();
+        if let Some(evt) = irq.notifier() {
+            self.irq_trigger.irq_evt = evt;
+        }
+    }
+}
+
+impl<B, I> VirtioDevice for Vsock<B, I>
+where
+    B: VsockBackend + 'static,
+    I: Interrupt + 'static,
 {
     fn avail_features(&self) -> u64 {
         self.avail_features

@@ -17,6 +17,18 @@ pub use self::bus::{Bus, BusDevice, Error as BusError};
 use crate::virtio::{QueueError, VsockError};
 use logger::{error, IncMetric, METRICS};
 
+use std::sync::{Arc, Mutex};
+use vm_device::interrupt::{Interrupt, InterruptSourceGroup};
+
+type SharedInterruptGroup<I> =
+    dyn InterruptSourceGroup<InterruptType = I, InterruptWrapper = Arc<I>>;
+
+pub trait InterruptSource {
+    type IrqType: Interrupt;
+
+    fn set_interrupt_group(&mut self, group: Arc<Mutex<SharedInterruptGroup<Self::IrqType>>>);
+}
+
 // Function used for reporting error in terms of logging
 // but also in terms of METRICS net event fails.
 pub(crate) fn report_net_event_fail(err: Error) {

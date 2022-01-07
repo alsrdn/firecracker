@@ -6,13 +6,17 @@ use std::os::unix::io::AsRawFd;
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use logger::{debug, error, warn};
 use utils::epoll::EventSet;
+use vm_device::interrupt::Interrupt;
 
 use crate::report_balloon_event_fail;
 use crate::virtio::{
     balloon::device::Balloon, VirtioDevice, DEFLATE_INDEX, INFLATE_INDEX, STATS_INDEX,
 };
 
-impl Balloon {
+impl<I> Balloon<I>
+where
+    I: Interrupt + 'static,
+{
     fn register_runtime_events(&self, ops: &mut EventOps) {
         if let Err(e) = ops.add(Events::new(&self.queue_evts[INFLATE_INDEX], EventSet::IN)) {
             error!("Failed to register inflate queue event: {}", e);
@@ -48,7 +52,10 @@ impl Balloon {
     }
 }
 
-impl MutEventSubscriber for Balloon {
+impl<I> MutEventSubscriber for Balloon<I>
+where
+    I: Interrupt + 'static,
+{
     fn process(&mut self, event: Events, ops: &mut EventOps) {
         let source = event.fd();
         let event_set = event.event_set();

@@ -8,15 +8,17 @@
 
 use devices::legacy::SerialDevice;
 use devices::legacy::SerialEventsWrapper;
-use libc::EFD_NONBLOCK;
 use logger::METRICS;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use devices::legacy::EventFdTrigger;
-use kvm_ioctls::VmFd;
 use utils::eventfd::EventFd;
+use vm_device::interrupt::{
+    legacy::LegacyIrqConfig, ConfigurableInterrupt, Interrupt, InterruptSourceGroup,
+};
 use vm_superio::Serial;
+
+use crate::{interrupts::KvmLegacyInterruptGroup, KvmInterruptManager, KvmLegacyInterrupt};
 
 /// Errors corresponding to the `PortIODeviceManager`.
 #[derive(Debug)]
@@ -40,10 +42,10 @@ impl fmt::Display for Error {
 
 type Result<T> = ::std::result::Result<T, Error>;
 
-fn create_serial(com_event: EventFdTrigger) -> Result<Arc<Mutex<SerialDevice>>> {
+fn create_serial(com_event: Arc<KvmLegacyInterrupt>) -> Result<Arc<Mutex<SerialDevice<KvmLegacyInterrupt>>>> {
     let serial_device = Arc::new(Mutex::new(SerialDevice {
         serial: Serial::with_events(
-            com_event.try_clone().map_err(Error::EventFd)?,
+            Some(com_event),
             SerialEventsWrapper {
                 metrics: METRICS.uart.clone(),
                 buffer_ready_event_fd: None,
@@ -61,47 +63,79 @@ fn create_serial(com_event: EventFdTrigger) -> Result<Arc<Mutex<SerialDevice>>> 
 /// The `LegacyDeviceManger` should be initialized only by using the constructor.
 pub struct PortIODeviceManager {
     pub io_bus: devices::Bus,
-    pub stdio_serial: Arc<Mutex<SerialDevice>>,
+    pub stdio_serial: Arc<Mutex<SerialDevice<KvmLegacyInterrupt>>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
 
-    pub com_evt_1_3: EventFdTrigger,
-    pub com_evt_2_4: EventFdTrigger,
-    pub kbd_evt: EventFd,
+    pub serial_irq_group: Arc<KvmLegacyInterruptGroup>,
+    pub kbd_irq_group: Arc<KvmLegacyInterruptGroup>,
 }
 
 impl PortIODeviceManager {
     /// Create a new DeviceManager handling legacy devices (uart, i8042).
-    pub fn new(serial: Arc<Mutex<SerialDevice>>, i8042_reset_evfd: EventFd) -> Result<Self> {
+    pub fn new(
+        serial: Arc<Mutex<SerialDevice<KvmLegacyInterrupt>>>,
+        i8042_reset_evfd: EventFd,
+        interrupt_manager: &KvmInterruptManager,
+    ) -> Result<Self> {
         let io_bus = devices::Bus::new();
-        let com_evt_1_3 = serial
-            .lock()
-            .expect("Poisoned lock")
-            .serial
-            .interrupt_evt()
-            .try_clone()
-            .map_err(Error::EventFd)?;
-        let com_evt_2_4 = EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?);
-        let kbd_evt = EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?;
+        // Interrupt group for COM ports
+        let mut serial_irq_group = interrupt_manager.get_new_legacy_group().unwrap();
+        // 1 IRQ for COM1 and COM3 + 1 IRQ for COM2 and COM4
+        serial_irq_group.allocate_interrupts(2).unwrap();
+        let irq = serial_irq_group.get(0).unwrap();
+        irq.update(&LegacyIrqConfig {
+            interrupt_line: Some(4),
+            interrupt_pin: None,
+        })
+        .unwrap();
+
+        {
+            let mut locked_serial = serial.lock().expect("Cannot lock serial");
+            locked_serial.set_interrupt_evt(irq);
+        }
+
+        let irq = serial_irq_group.get(1).unwrap();
+        irq.update(&LegacyIrqConfig {
+            interrupt_line: Some(3),
+            interrupt_pin: None,
+        })
+        .unwrap();
+
+        let mut kbd_irq_group = interrupt_manager.get_new_legacy_group().unwrap();
+        kbd_irq_group.allocate_interrupts(1).unwrap();
+        let kbd_irq = kbd_irq_group.get(0).unwrap();
+        kbd_irq
+            .update(&LegacyIrqConfig {
+                interrupt_line: Some(1),
+                interrupt_pin: None,
+            })
+            .unwrap();
 
         let i8042 = Arc::new(Mutex::new(devices::legacy::I8042Device::new(
             i8042_reset_evfd,
-            kbd_evt.try_clone().map_err(Error::EventFd)?,
+            kbd_irq
+                .notifier()
+                .unwrap()
+                .try_clone()
+                .map_err(Error::EventFd)?,
         )));
 
         Ok(PortIODeviceManager {
             io_bus,
             stdio_serial: serial,
             i8042,
-            com_evt_1_3,
-            com_evt_2_4,
-            kbd_evt,
+            serial_irq_group: Arc::new(serial_irq_group),
+            kbd_irq_group: Arc::new(kbd_irq_group),
         })
     }
 
     /// Register supported legacy devices.
-    pub fn register_devices(&mut self, vm_fd: &VmFd) -> Result<()> {
-        let serial_2_4 = create_serial(self.com_evt_2_4.try_clone().map_err(Error::EventFd)?)?;
-        let serial_1_3 = create_serial(self.com_evt_1_3.try_clone().map_err(Error::EventFd)?)?;
+    pub fn register_devices(&mut self) -> Result<()> {
+        let com_1_3_irq = self.serial_irq_group.get(0 as usize).unwrap();
+        let com_2_4_irq = self.serial_irq_group.get(1 as usize).unwrap();
+
+        let serial_2_4 = create_serial(com_2_4_irq)?;
+        let serial_1_3 = create_serial(com_1_3_irq)?;
         self.io_bus
             .insert(self.stdio_serial.clone(), 0x3f8, 0x8)
             .map_err(Error::BusError)?;
@@ -118,15 +152,8 @@ impl PortIODeviceManager {
             .insert(self.i8042.clone(), 0x060, 0x5)
             .map_err(Error::BusError)?;
 
-        vm_fd
-            .register_irqfd(&self.com_evt_1_3, 4)
-            .map_err(|e| Error::EventFd(std::io::Error::from_raw_os_error(e.errno())))?;
-        vm_fd
-            .register_irqfd(&self.com_evt_2_4, 3)
-            .map_err(|e| Error::EventFd(std::io::Error::from_raw_os_error(e.errno())))?;
-        vm_fd
-            .register_irqfd(&self.kbd_evt, 1)
-            .map_err(|e| Error::EventFd(std::io::Error::from_raw_os_error(e.errno())))?;
+        self.serial_irq_group.enable().unwrap();
+        self.kbd_irq_group.enable().unwrap();
 
         Ok(())
     }

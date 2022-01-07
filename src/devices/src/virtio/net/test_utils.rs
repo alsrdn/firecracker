@@ -18,6 +18,7 @@ use crate::virtio::test_utils::VirtQueue;
 use crate::virtio::{Net, Queue, QueueError};
 
 use rate_limiter::RateLimiter;
+use vm_device::interrupt::Interrupt;
 use vm_memory::{GuestAddress, GuestMemoryMmap};
 
 use utils::net::mac::MacAddr;
@@ -28,7 +29,7 @@ pub type Result<T> = ::std::result::Result<T, Error>;
 
 static NEXT_INDEX: AtomicUsize = AtomicUsize::new(1);
 
-pub fn default_net() -> Net {
+pub fn default_net<I: Interrupt + 'static>() -> Net<I> {
     let next_tap = NEXT_INDEX.fetch_add(1, Ordering::SeqCst);
     let tap_dev_name = format!("net-device{}", next_tap);
 
@@ -246,7 +247,11 @@ pub(crate) fn inject_tap_tx_frame(net: &Net, len: usize) -> Vec<u8> {
     frame
 }
 
-pub fn write_element_in_queue(net: &Net, idx: usize, val: u64) -> result::Result<(), DeviceError> {
+pub fn write_element_in_queue<I: Interrupt>(
+    net: &Net<I>,
+    idx: usize,
+    val: u64,
+) -> result::Result<(), DeviceError> {
     if idx > net.queue_evts.len() {
         return Err(DeviceError::QueueError(QueueError::DescIndexOutOfBounds(
             idx as u16,
@@ -256,7 +261,10 @@ pub fn write_element_in_queue(net: &Net, idx: usize, val: u64) -> result::Result
     Ok(())
 }
 
-pub fn get_element_from_queue(net: &Net, idx: usize) -> result::Result<u64, DeviceError> {
+pub fn get_element_from_queue<I: Interrupt>(
+    net: &Net<I>,
+    idx: usize,
+) -> result::Result<u64, DeviceError> {
     if idx > net.queue_evts.len() {
         return Err(DeviceError::QueueError(QueueError::DescIndexOutOfBounds(
             idx as u16,
@@ -274,13 +282,13 @@ pub fn default_guest_memory() -> GuestMemoryMmap {
         .expect("Cannot initialize memory")
 }
 
-pub fn set_mac(net: &mut Net, mac: MacAddr) {
+pub fn set_mac<I: Interrupt>(net: &mut Net<I>, mac: MacAddr) {
     net.guest_mac = Some(mac);
     net.config_space.guest_mac.copy_from_slice(mac.get_bytes());
 }
 
 // Assigns "guest virtio driver" activated queues to the net device.
-pub fn assign_queues(net: &mut Net, rxq: Queue, txq: Queue) {
+pub fn assign_queues<I: Interrupt>(net: &mut Net<I>, rxq: Queue, txq: Queue) {
     net.queues.clear();
     net.queues.push(rxq);
     net.queues.push(txq);

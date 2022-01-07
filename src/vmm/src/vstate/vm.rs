@@ -5,6 +5,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+use std::sync::Arc;
 use std::{
     fmt::{Display, Formatter},
     result,
@@ -107,7 +108,7 @@ pub type Result<T> = result::Result<T, Error>;
 
 /// A wrapper around creating and using a VM.
 pub struct Vm {
-    fd: VmFd,
+    fd: Arc<VmFd>,
 
     // X86 specific fields.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -136,7 +137,7 @@ impl Vm {
             arch::x86_64::msr::supported_guest_msrs(kvm).map_err(Error::GuestMSRs)?;
 
         Ok(Vm {
-            fd: vm_fd,
+            fd: Arc::new(vm_fd),
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             supported_cpuid,
             #[cfg(target_arch = "x86_64")]
@@ -212,6 +213,10 @@ impl Vm {
     /// Gets a reference to the kvm file descriptor owned by this VM.
     pub fn fd(&self) -> &VmFd {
         &self.fd
+    }
+
+    pub fn clone_fd(&self) -> Arc<VmFd> {
+        self.fd.clone()
     }
 
     #[cfg(target_arch = "x86_64")]

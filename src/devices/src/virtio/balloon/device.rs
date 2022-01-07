@@ -6,7 +6,7 @@ use std::cmp;
 use std::io::Write;
 use std::result::Result;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ::timerfd::{ClockId, SetTimeFlags, TimerFd, TimerState};
@@ -15,6 +15,7 @@ use ::logger::{error, IncMetric, METRICS};
 use ::utils::eventfd::EventFd;
 use ::virtio_gen::virtio_blk::*;
 use ::vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryMmap};
+use vm_device::interrupt::Interrupt;
 
 use super::*;
 use super::{
@@ -25,6 +26,7 @@ use super::{
 
 use crate::virtio::balloon::Error as BalloonError;
 use crate::virtio::{IrqTrigger, IrqType};
+use crate::{InterruptSource, SharedInterruptGroup};
 
 const SIZE_OF_U32: usize = std::mem::size_of::<u32>();
 const SIZE_OF_STAT: usize = std::mem::size_of::<BalloonStat>();
@@ -123,7 +125,7 @@ impl BalloonStats {
 }
 
 // Virtio balloon device.
-pub struct Balloon {
+pub struct Balloon<I: Interrupt> {
     // Virtio fields.
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -135,6 +137,7 @@ pub struct Balloon {
     pub(crate) queue_evts: [EventFd; NUM_QUEUES],
     pub(crate) device_state: DeviceState,
     pub(crate) irq_trigger: IrqTrigger,
+    pub(crate) interrupt_group: Option<Arc<Mutex<SharedInterruptGroup<I>>>>,
 
     // Implementation specific fields.
     pub(crate) restored: bool,
@@ -148,13 +151,16 @@ pub struct Balloon {
     pub(crate) pfn_buffer: [u32; MAX_PAGE_COMPACT_BUFFER],
 }
 
-impl Balloon {
+impl<I> Balloon<I>
+where
+    I: Interrupt + 'static,
+{
     pub fn new(
         amount_mib: u32,
         deflate_on_oom: bool,
         stats_polling_interval_s: u16,
         restored: bool,
-    ) -> Result<Balloon, BalloonError> {
+    ) -> Result<Balloon<I>, BalloonError> {
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
 
         if deflate_on_oom {
@@ -192,6 +198,7 @@ impl Balloon {
             queue_evts,
             queues,
             irq_trigger: IrqTrigger::new().map_err(BalloonError::EventFd)?,
+            interrupt_group: None,
             device_state: DeviceState::Inactive,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(BalloonError::EventFd)?,
             restored,
@@ -494,7 +501,26 @@ impl Balloon {
     }
 }
 
-impl VirtioDevice for Balloon {
+impl<I> InterruptSource for Balloon<I>
+where
+    I: Interrupt<NotifierType = EventFd> + 'static,
+{
+    type IrqType = I;
+
+    fn set_interrupt_group(&mut self, group: Arc<Mutex<SharedInterruptGroup<I>>>) {
+        self.interrupt_group = Some(group.clone());
+        let irq_group = group.lock().unwrap();
+        let irq = irq_group.get(0 as usize).unwrap();
+        if let Some(evt) = irq.notifier() {
+            self.irq_trigger.irq_evt = evt;
+        }
+    }
+}
+
+impl<I> VirtioDevice for Balloon<I>
+where
+    I: Interrupt + 'static,
+{
     fn device_type(&self) -> u32 {
         TYPE_BALLOON
     }

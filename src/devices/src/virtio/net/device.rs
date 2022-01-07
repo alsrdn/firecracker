@@ -15,6 +15,7 @@ use crate::virtio::{
     ActivateResult, DeviceState, IrqTrigger, IrqType, Queue, VirtioDevice, TYPE_NET,
 };
 use crate::{report_net_event_fail, Error as DeviceError};
+use crate::{InterruptSource, SharedInterruptGroup};
 
 use dumbo::pdu::ethernet::EthernetFrame;
 use libc::EAGAIN;
@@ -26,7 +27,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::{cmp, mem, result};
 use utils::eventfd::EventFd;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
@@ -35,6 +36,7 @@ use virtio_gen::virtio_net::{
     VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO,
     VIRTIO_NET_F_MAC,
 };
+use vm_device::interrupt::Interrupt;
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
 
 enum FrontendError {
@@ -91,7 +93,7 @@ impl Default for ConfigSpace {
 
 unsafe impl ByteValued for ConfigSpace {}
 
-pub struct Net {
+pub struct Net<I: Interrupt> {
     pub(crate) id: String,
 
     pub tap: Tap,
@@ -115,6 +117,7 @@ pub struct Net {
     tx_frame_buf: [u8; MAX_BUFFER_SIZE],
 
     pub(crate) irq_trigger: IrqTrigger,
+    pub(crate) interrupt_group: Option<Arc<Mutex<SharedInterruptGroup<I>>>>,
 
     pub(crate) config_space: ConfigSpace,
     pub(crate) guest_mac: Option<MacAddr>,
@@ -128,7 +131,10 @@ pub struct Net {
     pub(crate) mocks: Mocks,
 }
 
-impl Net {
+impl<I> Net<I>
+where
+    I: Interrupt + 'static,
+{
     /// Create a new virtio network device with the given TAP interface.
     pub fn new_with_tap(
         id: String,
@@ -194,6 +200,7 @@ impl Net {
             tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_iovec: Vec::with_capacity(QUEUE_SIZE as usize),
             irq_trigger: IrqTrigger::new().map_err(Error::EventFd)?,
+            interrupt_group: None,
             device_state: DeviceState::Inactive,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
             config_space,
@@ -746,7 +753,26 @@ impl Net {
     }
 }
 
-impl VirtioDevice for Net {
+impl<I> InterruptSource for Net<I>
+where
+    I: Interrupt<NotifierType = EventFd> + 'static,
+{
+    type IrqType = I;
+
+    fn set_interrupt_group(&mut self, group: Arc<Mutex<SharedInterruptGroup<I>>>) {
+        self.interrupt_group = Some(group.clone());
+        let irq_group = group.lock().unwrap();
+        let irq = irq_group.get(0 as usize).unwrap();
+        if let Some(evt) = irq.notifier() {
+            self.irq_trigger.irq_evt = evt;
+        }
+    }
+}
+
+impl<I> VirtioDevice for Net<I>
+where
+    I: Interrupt + 'static,
+{
     fn device_type(&self) -> u32 {
         TYPE_NET
     }

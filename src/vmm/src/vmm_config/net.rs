@@ -7,6 +7,7 @@ use std::result;
 use std::sync::{Arc, Mutex};
 
 use super::RateLimiterConfig;
+use crate::interrupts::KvmLegacyInterrupt;
 use crate::Error as VmmError;
 use devices::virtio::net::TapError;
 use devices::virtio::Net;
@@ -39,8 +40,8 @@ pub struct NetworkInterfaceConfig {
     pub allow_mmds_requests: bool,
 }
 
-impl From<&Net> for NetworkInterfaceConfig {
-    fn from(net: &Net) -> Self {
+impl From<&Net<KvmLegacyInterrupt>> for NetworkInterfaceConfig {
+    fn from(net: &Net<KvmLegacyInterrupt>) -> Self {
         let rx_rl: RateLimiterConfig = net.rx_rate_limiter().into();
         let tx_rl: RateLimiterConfig = net.tx_rate_limiter().into();
         NetworkInterfaceConfig {
@@ -125,7 +126,7 @@ type Result<T> = result::Result<T, NetworkInterfaceError>;
 /// Builder for a list of network devices.
 #[derive(Default)]
 pub struct NetBuilder {
-    net_devices: Vec<Arc<Mutex<Net>>>,
+    net_devices: Vec<Arc<Mutex<Net<KvmLegacyInterrupt>>>>,
 }
 
 impl NetBuilder {
@@ -138,19 +139,22 @@ impl NetBuilder {
     }
 
     /// Returns a immutable iterator over the network devices.
-    pub fn iter(&self) -> ::std::slice::Iter<Arc<Mutex<Net>>> {
+    pub fn iter(&self) -> ::std::slice::Iter<Arc<Mutex<Net<KvmLegacyInterrupt>>>> {
         self.net_devices.iter()
     }
 
     /// Returns a mutable iterator over the network devices.
-    pub fn iter_mut(&mut self) -> ::std::slice::IterMut<Arc<Mutex<Net>>> {
+    pub fn iter_mut(&mut self) -> ::std::slice::IterMut<Arc<Mutex<Net<KvmLegacyInterrupt>>>> {
         self.net_devices.iter_mut()
     }
 
     /// Builds a network device based on a network interface config. Keeps a device reference
     /// in the builder's internal list.
-    pub fn build(&mut self, netif_config: NetworkInterfaceConfig) -> Result<Arc<Mutex<Net>>> {
-        let mac_conflict = |net: &Arc<Mutex<Net>>| {
+    pub fn build(
+        &mut self,
+        netif_config: NetworkInterfaceConfig,
+    ) -> Result<Arc<Mutex<Net<KvmLegacyInterrupt>>>> {
+        let mac_conflict = |net: &Arc<Mutex<Net<KvmLegacyInterrupt>>>| {
             let net = net.lock().expect("Poisoned lock");
             // Check if another net dev has same MAC.
             netif_config.guest_mac.is_some()
@@ -183,7 +187,7 @@ impl NetBuilder {
     }
 
     /// Creates a Net device from a NetworkInterfaceConfig.
-    pub fn create_net(cfg: NetworkInterfaceConfig) -> Result<Net> {
+    pub fn create_net(cfg: NetworkInterfaceConfig) -> Result<Net<KvmLegacyInterrupt>> {
         let rx_rate_limiter = cfg
             .rx_rate_limiter
             .map(super::RateLimiterConfig::try_into)

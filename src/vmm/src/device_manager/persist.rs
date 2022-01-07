@@ -8,6 +8,7 @@ use std::result::Result;
 use std::sync::{Arc, Mutex};
 
 use super::mmio::*;
+use crate::interrupts::KvmLegacyInterrupt;
 use crate::EventManager;
 use logger::error;
 
@@ -193,7 +194,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                 TYPE_BALLOON => {
                     let balloon_state = locked_device
                         .as_any()
-                        .downcast_ref::<Balloon>()
+                        .downcast_ref::<Balloon<KvmLegacyInterrupt>>()
                         .unwrap()
                         .save();
                     states.balloon_device = Some(ConnectedBalloonState {
@@ -206,7 +207,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                 TYPE_BLOCK => {
                     let block_state = locked_device
                         .as_any()
-                        .downcast_ref::<Block>()
+                        .downcast_ref::<Block<KvmLegacyInterrupt>>()
                         .unwrap()
                         .save();
                     states.block_devices.push(ConnectedBlockState {
@@ -217,7 +218,11 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                     });
                 }
                 TYPE_NET => {
-                    let net_state = locked_device.as_any().downcast_ref::<Net>().unwrap().save();
+                    let net_state = locked_device
+                        .as_any()
+                        .downcast_ref::<Net<KvmLegacyInterrupt>>()
+                        .unwrap()
+                        .save();
                     states.net_devices.push(ConnectedNetState {
                         device_id: devid.clone(),
                         device_state: net_state,
@@ -229,7 +234,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                     let vsock = locked_device
                         .as_mut_any()
                         // Currently, VsockUnixBackend is the only implementation of VsockBackend.
-                        .downcast_mut::<Vsock<VsockUnixBackend>>()
+                        .downcast_mut::<Vsock<VsockUnixBackend, KvmLegacyInterrupt>>()
                         .unwrap();
 
                     let vsock_state = VsockState {
@@ -320,7 +325,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
 
         if let Some(balloon_state) = &state.balloon_device {
             let device = Arc::new(Mutex::new(
-                Balloon::restore(
+                Balloon::<KvmLegacyInterrupt>::restore(
                     BalloonConstructorArgs { mem: mem.clone() },
                     &balloon_state.device_state,
                 )
@@ -339,7 +344,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
 
         for block_state in &state.block_devices {
             let device = Arc::new(Mutex::new(
-                Block::restore(
+                Block::<KvmLegacyInterrupt>::restore(
                     BlockConstructorArgs { mem: mem.clone() },
                     &block_state.device_state,
                 )
@@ -357,7 +362,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
         }
         for net_state in &state.net_devices {
             let device = Arc::new(Mutex::new(
-                Net::restore(
+                Net::<KvmLegacyInterrupt>::restore(
                     NetConstructorArgs { mem: mem.clone() },
                     &net_state.device_state,
                 )
@@ -380,7 +385,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
             let backend = VsockUnixBackend::restore(ctor_args, &vsock_state.device_state.backend)
                 .map_err(Error::VsockUnixBackend)?;
             let device = Arc::new(Mutex::new(
-                Vsock::restore(
+                Vsock::<VsockUnixBackend, KvmLegacyInterrupt>::restore(
                     VsockConstructorArgs {
                         mem: mem.clone(),
                         backend,

@@ -10,6 +10,7 @@ use std::result;
 use std::sync::{Arc, Mutex};
 
 use super::RateLimiterConfig;
+use crate::interrupts::KvmLegacyInterrupt;
 use crate::Error as VmmError;
 use devices::virtio::Block;
 
@@ -90,8 +91,8 @@ pub struct BlockDeviceConfig {
     pub rate_limiter: Option<RateLimiterConfig>,
 }
 
-impl From<&Block> for BlockDeviceConfig {
-    fn from(block: &Block) -> Self {
+impl From<&Block<KvmLegacyInterrupt>> for BlockDeviceConfig {
+    fn from(block: &Block<KvmLegacyInterrupt>) -> Self {
         let rl: RateLimiterConfig = block.rate_limiter().into();
         BlockDeviceConfig {
             drive_id: block.id().clone(),
@@ -126,14 +127,14 @@ pub struct BlockBuilder {
     // Root Device should be the first in the list whether or not PARTUUID is
     // specified in order to avoid bugs in case of switching from partuuid boot
     // scenarios to /dev/vda boot type.
-    pub list: VecDeque<Arc<Mutex<Block>>>,
+    pub list: VecDeque<Arc<Mutex<Block<KvmLegacyInterrupt>>>>,
 }
 
 impl BlockBuilder {
     /// Constructor for BlockDevices. It initializes an empty LinkedList.
     pub fn new() -> Self {
         Self {
-            list: VecDeque::<Arc<Mutex<Block>>>::new(),
+            list: VecDeque::<Arc<Mutex<Block<KvmLegacyInterrupt>>>>::new(),
         }
     }
 
@@ -194,7 +195,9 @@ impl BlockBuilder {
     }
 
     /// Creates a Block device from a BlockDeviceConfig.
-    pub fn create_block(block_device_config: BlockDeviceConfig) -> Result<Block> {
+    pub fn create_block(
+        block_device_config: BlockDeviceConfig,
+    ) -> Result<Block<KvmLegacyInterrupt>> {
         // check if the path exists
         let path_on_host = PathBuf::from(&block_device_config.path_on_host);
         if !path_on_host.exists() {
