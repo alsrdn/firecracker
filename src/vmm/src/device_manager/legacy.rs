@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use utils::eventfd::EventFd;
 use vm_device::interrupt::{
-    legacy::LegacyIrqConfig, ConfigurableInterrupt, InterruptSourceGroup, InterruptWithNotifiers,
+    legacy::LegacyIrqConfig, AsRefTriggerNotifier, ConfigurableInterrupt, InterruptSourceGroup,
 };
 use vm_superio::Serial;
 

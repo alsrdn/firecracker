@@ -13,7 +13,7 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::result;
 use std::sync::Arc;
-use vm_device::interrupt::Interrupt;
+use vm_device::interrupt::{EdgeInterrupt, Interrupt};
 use vm_superio::serial::Error as SerialError;
 use vm_superio::serial::SerialEvents;
 use vm_superio::Serial;
@@ -39,7 +39,7 @@ pub trait RawIOHandler {
     fn raw_input(&mut self, _data: &[u8]) -> result::Result<(), RawIOError>;
 }
 
-impl<I: Interrupt, EV: SerialEvents, W: Write> RawIOHandler for Serial<I, EV, W> {
+impl<I: Interrupt + EdgeInterrupt, EV: SerialEvents, W: Write> RawIOHandler for Serial<I, EV, W> {
     // This is not used for anything and is basically just a dummy implementation for `raw_input`.
     fn raw_input(&mut self, data: &[u8]) -> result::Result<(), RawIOError> {
         // Fail fast if the serial is serviced with more data than it can buffer.
@@ -89,12 +89,12 @@ impl SerialEvents for SerialEventsWrapper {
     }
 }
 
-pub struct SerialWrapper<I: Interrupt, EV: SerialEvents, W: Write> {
+pub struct SerialWrapper<I: Interrupt + EdgeInterrupt, EV: SerialEvents, W: Write> {
     pub serial: Serial<I, EV, W>,
     pub input: Option<Box<dyn ReadableFd + Send>>,
 }
 
-impl<I: Interrupt, W: Write> SerialWrapper<I, SerialEventsWrapper, W> {
+impl<I: Interrupt + EdgeInterrupt, W: Write> SerialWrapper<I, SerialEventsWrapper, W> {
     fn handle_ewouldblock(&self, ops: &mut EventOps) {
         let buffer_ready_fd = self.buffer_ready_evt_fd();
         let input_fd = self.serial_input_fd();
@@ -167,7 +167,7 @@ impl<I: Interrupt, W: Write> SerialWrapper<I, SerialEventsWrapper, W> {
 
 pub type SerialDevice<I> = SerialWrapper<I, SerialEventsWrapper, Box<dyn io::Write + Send>>;
 
-impl<I: Interrupt, W: std::io::Write> MutEventSubscriber
+impl<I: Interrupt + EdgeInterrupt, W: std::io::Write> MutEventSubscriber
     for SerialWrapper<I, SerialEventsWrapper, W>
 {
     /// Handle events on the serial input fd.
@@ -253,7 +253,7 @@ impl<I: Interrupt, W: std::io::Write> MutEventSubscriber
     }
 }
 
-impl<I: 'static + Interrupt + Send + Sync, W: Write + Send + 'static> BusDevice
+impl<I: 'static + Interrupt + EdgeInterrupt + Send + Sync, W: Write + Send + 'static> BusDevice
     for SerialWrapper<I, SerialEventsWrapper, W>
 {
     fn read(&mut self, offset: u64, data: &mut [u8]) {

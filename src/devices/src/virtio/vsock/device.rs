@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use logger::{debug, error, warn, IncMetric, METRICS};
 use utils::byte_order;
 use utils::eventfd::EventFd;
-use vm_device::interrupt::{Interrupt, InterruptWithNotifiers};
+use vm_device::interrupt::{AsRefTriggerNotifier, Interrupt};
 use vm_memory::{Bytes, GuestMemoryMmap};
 
 use super::super::super::Error as DeviceError;
@@ -254,7 +254,7 @@ where
 impl<B, I> InterruptSource for Vsock<B, I>
 where
     B: VsockBackend + 'static,
-    I: Interrupt + InterruptWithNotifiers<NotifierType = EventFd> + 'static,
+    I: Interrupt + AsRefTriggerNotifier<NotifierType = EventFd> + 'static,
 {
     type IrqType = I;
 

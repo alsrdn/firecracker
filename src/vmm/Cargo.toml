@@ -28,7 +28,7 @@ snapshot = { path = "../snapshot"}
 utils = { path = "../utils" }
 virtio_gen = { path = "../virtio_gen" }
 vm-memory = { path = "../vm-memory" }
-vm-device = { git = "https://github.com/alsrdn/vm-device.git", branch = "interrupt_v4" }
+vm-device = { git = "https://github.com/alsrdn/vm-device.git", branch = "interrupt_abstractions" }
 vm-allocator = { git = "https://github.com/rust-vmm/vm-allocator.git", branch = "main" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

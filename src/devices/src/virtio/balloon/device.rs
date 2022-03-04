@@ -15,7 +15,7 @@ use ::logger::{error, IncMetric, METRICS};
 use ::utils::eventfd::EventFd;
 use ::virtio_gen::virtio_blk::*;
 use ::vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryMmap};
-use vm_device::interrupt::{Interrupt, InterruptWithNotifiers};
+use vm_device::interrupt::{AsRefTriggerNotifier, Interrupt};
 
 use super::*;
 use super::{
@@ -503,7 +503,7 @@ where
 
 impl<I> InterruptSource for Balloon<I>
 where
-    I: Interrupt + InterruptWithNotifiers<NotifierType = EventFd> + 'static,
+    I: Interrupt + AsRefTriggerNotifier<NotifierType = EventFd> + 'static,
 {
     type IrqType = I;
 

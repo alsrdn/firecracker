@@ -6,8 +6,8 @@ use utils::eventfd::EventFd;
 use vm_allocator::IdAllocator;
 use vm_device::interrupt::Error as VmDeviceError;
 use vm_device::interrupt::{
-    legacy::LegacyIrqConfig, msi::MsiIrqConfig, ConfigurableInterrupt, Interrupt,
-    InterruptSourceGroup, InterruptWithNotifiers, MaskableInterrupt,
+    legacy::LegacyIrqConfig, msi::MsiIrqConfig, AsRefTriggerNotifier, ConfigurableInterrupt,
+    EdgeInterrupt, Interrupt, InterruptSourceGroup, MaskableInterrupt,
 };
 
 use crate::interrupts::kvm_irq_routing::KvmIrqRoutingTable;
@@ -35,7 +35,7 @@ impl KvmMsiInterrupt {
         vm_fd: Arc<VmFd>,
         routing_table: Arc<Mutex<KvmIrqRoutingTable>>,
     ) -> Result<Self, std::io::Error> {
-        let interrupt = KvmInterrupt::new(gsi, vm_fd, routing_table).unwrap();
+        let interrupt = KvmInterrupt::new(gsi, vm_fd, routing_table)?;
         Ok(KvmMsiInterrupt {
             irq: interrupt,
             config: Mutex::new(None),
@@ -43,7 +43,7 @@ impl KvmMsiInterrupt {
     }
 }
 
-impl Interrupt for KvmMsiInterrupt {
+impl EdgeInterrupt for KvmMsiInterrupt {
     fn trigger(&self) -> Result<(), VmDeviceError> {
         self.irq
             .irq_fd
@@ -51,7 +51,9 @@ impl Interrupt for KvmMsiInterrupt {
             .map_err(|_| VmDeviceError::InterruptNotTriggered)?;
         Ok(())
     }
+}
 
+impl Interrupt for KvmMsiInterrupt {
     fn enable(&self) -> Result<(), VmDeviceError> {
         self.irq
             .register_irqfd()
@@ -67,7 +69,7 @@ impl Interrupt for KvmMsiInterrupt {
     }
 }
 
-impl InterruptWithNotifiers for KvmMsiInterrupt {
+impl AsRefTriggerNotifier for KvmMsiInterrupt {
     type NotifierType = EventFd;
 
     fn trigger_notifier(&self) -> &EventFd {
@@ -93,13 +95,16 @@ impl ConfigurableInterrupt for KvmMsiInterrupt {
             return Err(VmDeviceError::InvalidConfiguration);
         }
         let mut routing_table = self.irq.routing_table.lock().expect("kk");
-        routing_table.route_msi(
-            self.irq.gsi,
-            cfg.low_addr,
-            cfg.high_addr,
-            cfg.data,
-            cfg.devid,
-        );
+        routing_table
+            .route_msi(
+                self.irq.gsi,
+                cfg.low_addr,
+                cfg.high_addr,
+                cfg.data,
+                cfg.devid,
+            )
+            .map_err(|_| VmDeviceError::InvalidConfiguration)?;
+
         Ok(())
     }
 
@@ -124,7 +129,7 @@ impl KvmLegacyInterrupt {
         vm_fd: Arc<VmFd>,
         routing_table: Arc<Mutex<KvmIrqRoutingTable>>,
     ) -> Result<Self, std::io::Error> {
-        let interrupt = KvmInterrupt::new(gsi, vm_fd, routing_table).unwrap();
+        let interrupt = KvmInterrupt::new(gsi, vm_fd, routing_table)?;
         Ok(KvmLegacyInterrupt {
             irq: interrupt,
             config: Mutex::new(None),
@@ -132,7 +137,7 @@ impl KvmLegacyInterrupt {
     }
 }
 
-impl Interrupt for KvmLegacyInterrupt {
+impl EdgeInterrupt for KvmLegacyInterrupt {
     fn trigger(&self) -> Result<(), VmDeviceError> {
         self.irq
             .irq_fd
@@ -140,7 +145,9 @@ impl Interrupt for KvmLegacyInterrupt {
             .map_err(|_| VmDeviceError::InterruptNotTriggered)?;
         Ok(())
     }
+}
 
+impl Interrupt for KvmLegacyInterrupt {
     fn enable(&self) -> Result<(), VmDeviceError> {
         if !self.irq.configured.load(Ordering::Acquire) {
             return Err(VmDeviceError::InterruptNotChanged);
@@ -160,7 +167,7 @@ impl Interrupt for KvmLegacyInterrupt {
     }
 }
 
-impl InterruptWithNotifiers for KvmLegacyInterrupt {
+impl AsRefTriggerNotifier for KvmLegacyInterrupt {
     type NotifierType = EventFd;
 
     fn trigger_notifier(&self) -> &EventFd {
@@ -176,16 +183,13 @@ impl ConfigurableInterrupt for KvmLegacyInterrupt {
         let mut routing_table = self.irq.routing_table.lock().expect("Poisoned Lock");
         let mut config = self.config.lock().expect("Poisoned Lock");
 
-        if let Some(intx) = cfg.interrupt_pin {
-            routing_table.route_intx(gsi, intx as u8, cfg.interrupt_line);
-            *config = Some(*cfg);
-        } else {
-            let line = routing_table.route_generic(gsi, cfg.interrupt_line);
-            *config = Some(LegacyIrqConfig {
-                interrupt_line: Some(line),
-                interrupt_pin: None,
-            });
-        }
+        let line = routing_table
+            .route_generic(gsi, cfg.interrupt_line)
+            .map_err(|_| VmDeviceError::InvalidConfiguration)?;
+        *config = Some(LegacyIrqConfig {
+            interrupt_line: Some(line),
+            interrupt_pin: None,
+        });
         self.irq.configured.store(true, Ordering::Release);
 
         Ok(())
@@ -291,18 +295,20 @@ impl InterruptSourceGroup for KvmMsiInterruptGroup {
     }
 
     fn get(&self, index: usize) -> Option<Self::InterruptWrapper> {
-        let int = self.interrupts.get(index as usize).unwrap();
-        Some(int.clone())
+        self.interrupts.get(index).map(|int| int.clone())
     }
 
     fn allocate_interrupts(&mut self, size: usize) -> Result<(), vm_device::interrupt::Error> {
         let mut allocator = self.allocator.lock().unwrap();
 
         for _ in 0..size {
-            let gsi = allocator.allocate_id().unwrap();
+            let gsi = allocator
+                .allocate_id()
+                .map_err(|_| VmDeviceError::InterruptAllocationError)?;
 
             let interrupt =
-                KvmMsiInterrupt::new(gsi, self.vm_fd.clone(), self.routing_table.clone()).unwrap();
+                KvmMsiInterrupt::new(gsi, self.vm_fd.clone(), self.routing_table.clone())
+                    .map_err(|_| VmDeviceError::InterruptAllocationError)?;
             self.interrupts.push(Arc::new(interrupt));
         }
         Ok(())
@@ -362,26 +368,27 @@ impl InterruptSourceGroup for KvmLegacyInterruptGroup {
     }
 
     fn get(&self, index: usize) -> Option<Self::InterruptWrapper> {
-        let int = self.interrupts.get(index as usize).unwrap();
-        Some(int.clone())
+        self.interrupts.get(index as usize).map(|int| int.clone())
     }
 
     fn allocate_interrupts(&mut self, size: usize) -> Result<(), vm_device::interrupt::Error> {
         let mut allocator = self.allocator.lock().unwrap();
 
         for _ in 0..size {
-            let gsi = allocator.allocate_id().unwrap();
+            let gsi = allocator
+                .allocate_id()
+                .map_err(|_| VmDeviceError::InterruptAllocationError)?;
 
             let interrupt =
                 KvmLegacyInterrupt::new(gsi, self.vm_fd.clone(), self.routing_table.clone())
-                    .unwrap();
+                    .map_err(|_| VmDeviceError::InterruptAllocationError)?;
             self.interrupts.push(Arc::new(interrupt));
         }
         Ok(())
     }
 
     fn free_interrupts(&mut self) -> Result<(), VmDeviceError> {
-        Ok(())
+        Err(VmDeviceError::OperationNotSupported)
     }
 }
 
@@ -394,10 +401,11 @@ pub struct KvmInterruptManager {
 impl KvmInterruptManager {
     pub fn new(vm_fd: Arc<VmFd>) -> Self {
         let allocator = IdAllocator::new(1, 1024).unwrap();
+        let kvm_routing_table = KvmIrqRoutingTable::new(vm_fd.clone()).unwrap();
         KvmInterruptManager {
             allocator: Arc::new(Mutex::new(allocator)),
             vm_fd: vm_fd.clone(),
-            routing_table: Arc::new(Mutex::new(KvmIrqRoutingTable::new(vm_fd))),
+            routing_table: Arc::new(Mutex::new(kvm_routing_table)),
         }
     }
 

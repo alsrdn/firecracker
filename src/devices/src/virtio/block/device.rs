@@ -19,7 +19,7 @@ use logger::{error, warn, IncMetric, METRICS};
 use rate_limiter::{BucketUpdate, RateLimiter};
 use utils::eventfd::EventFd;
 use virtio_gen::virtio_blk::*;
-use vm_device::interrupt::{Interrupt, InterruptWithNotifiers};
+use vm_device::interrupt::{AsRefTriggerNotifier, Interrupt};
 use vm_memory::GuestMemoryMmap;
 
 use super::{
@@ -394,7 +394,7 @@ where
 
 impl<I> InterruptSource for Block<I>
 where
-    I: Interrupt + InterruptWithNotifiers<NotifierType = EventFd> + 'static,
+    I: Interrupt + AsRefTriggerNotifier<NotifierType = EventFd> + 'static,
 {
     type IrqType = I;
 

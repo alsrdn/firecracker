@@ -36,7 +36,7 @@ use virtio_gen::virtio_net::{
     VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO,
     VIRTIO_NET_F_MAC,
 };
-use vm_device::interrupt::{Interrupt, InterruptWithNotifiers};
+use vm_device::interrupt::{AsRefTriggerNotifier, Interrupt};
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
 
 enum FrontendError {
@@ -755,7 +755,7 @@ where
 
 impl<I> InterruptSource for Net<I>
 where
-    I: Interrupt + InterruptWithNotifiers<NotifierType = EventFd> + 'static,
+    I: Interrupt + AsRefTriggerNotifier<NotifierType = EventFd> + 'static,
 {
     type IrqType = I;
 
