@@ -125,6 +125,9 @@ def unixbench_workload(context):
     errcode, _, _ = ssh_connection.execute_command(make_cmd)
     assert errcode == 0
 
+    _, stdout, _ = ssh_connection.execute_command(f"cat /sys/devices/system/cpu/vulnerabilities/spectre_v2")
+    print(str(stdout.read()))
+
     unixbench_cmd = f"cd ~/byte-unixbench-master/UnixBench; ./Run syscall"
     errcode, stdout, stderr = ssh_connection.execute_command(unixbench_cmd)
     print(str(stdout.read()))
