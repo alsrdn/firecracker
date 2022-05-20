@@ -207,6 +207,11 @@ fn create_boot_msr_entries() -> Vec<kvm_msr_entry> {
             data: u64::from(MSR_IA32_MISC_ENABLE_FAST_STRING),
             ..Default::default()
         },
+        kvm_msr_entry {
+            index: MSR_IA32_ARCH_CAPABILITIES,
+            data: 0xc69,
+            ..Default::default()
+        },
     ]
 }
 

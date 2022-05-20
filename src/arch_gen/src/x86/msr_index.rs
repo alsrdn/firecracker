@@ -44,6 +44,7 @@ pub const ATM_LNC_C6_AUTO_DEMOTE: ::std::os::raw::c_uint = 0x02000000;
 pub const SNB_C1_AUTO_UNDEMOTE: ::std::os::raw::c_uint = 0x08000000;
 pub const SNB_C3_AUTO_UNDEMOTE: ::std::os::raw::c_uint = 0x10000000;
 pub const MSR_MTRRcap: ::std::os::raw::c_uint = 0x000000fe;
+pub const MSR_IA32_ARCH_CAPABILITIES: ::std::os::raw::c_uint = 0x0000010a;
 pub const MSR_IA32_BBL_CR_CTL: ::std::os::raw::c_uint = 0x00000119;
 pub const MSR_IA32_BBL_CR_CTL3: ::std::os::raw::c_uint = 0x0000011e;
 pub const MSR_IA32_SYSENTER_CS: ::std::os::raw::c_uint = 0x00000174;
