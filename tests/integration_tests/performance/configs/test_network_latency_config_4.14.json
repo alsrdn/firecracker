@@ -24,7 +24,7 @@
             "m5d.metal": {
                 "cpus": [
                     {
-                        "model": "Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz",
+                        "model": "Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz",
                         "baselines": {
                             "latency": {
                                 "vmlinux-4.14.bin": {
@@ -32,8 +32,8 @@
                                         "1vcpu_1024mb.json": {
                                             "Avg": {
                                                 "ping": {
-                                                    "target": 0.245,
-                                                    "delta_percentage": 0.02
+                                                    "target": 0.192,
+                                                    "delta_percentage": 0.05
                                                 }
                                             }
                                         }
@@ -44,34 +44,8 @@
                                         "1vcpu_1024mb.json": {
                                             "Avg": {
                                                 "ping": {
-                                                    "target": 0.258,
-                                                    "delta_percentage": 0.02
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            "pkt_loss": {
-                                "vmlinux-4.14.bin": {
-                                    "ubuntu-18.04.ext4": {
-                                        "1vcpu_1024mb.json": {
-                                            "Avg": {
-                                                "ping": {
-                                                    "target": 0.0,
-                                                    "delta_percentage": 0
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                                "vmlinux-5.10.bin": {
-                                    "ubuntu-18.04.ext4": {
-                                        "1vcpu_1024mb.json": {
-                                            "Avg": {
-                                                "ping": {
-                                                    "target": 0.0,
-                                                    "delta_percentage": 0
+                                                    "target": 0.217,
+                                                    "delta_percentage": 0.04
                                                 }
                                             }
                                         }
@@ -81,7 +55,7 @@
                         }
                     },
                     {
-                        "model": "Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz",
+                        "model": "Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz",
                         "baselines": {
                             "latency": {
                                 "vmlinux-4.14.bin": {
@@ -89,7 +63,7 @@
                                         "1vcpu_1024mb.json": {
                                             "Avg": {
                                                 "ping": {
-                                                    "target": 0.219,
+                                                    "target": 0.244,
                                                     "delta_percentage": 0.01
                                                 }
                                             }
@@ -101,34 +75,8 @@
                                         "1vcpu_1024mb.json": {
                                             "Avg": {
                                                 "ping": {
-                                                    "target": 0.234,
+                                                    "target": 0.261,
                                                     "delta_percentage": 0.01
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            "pkt_loss": {
-                                "vmlinux-4.14.bin": {
-                                    "ubuntu-18.04.ext4": {
-                                        "1vcpu_1024mb.json": {
-                                            "Avg": {
-                                                "ping": {
-                                                    "target": 0.0,
-                                                    "delta_percentage": 0
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                                "vmlinux-5.10.bin": {
-                                    "ubuntu-18.04.ext4": {
-                                        "1vcpu_1024mb.json": {
-                                            "Avg": {
-                                                "ping": {
-                                                    "target": 0.0,
-                                                    "delta_percentage": 0
                                                 }
                                             }
                                         }
@@ -164,32 +112,6 @@
                                                 "ping": {
                                                     "target": 0.037,
                                                     "delta_percentage": 0.01
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            "pkt_loss": {
-                                "vmlinux-4.14.bin": {
-                                    "ubuntu-18.04.ext4": {
-                                        "1vcpu_1024mb.json": {
-                                            "Avg": {
-                                                "ping": {
-                                                    "target": 0.0,
-                                                    "delta_percentage": 0
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                                "vmlinux-5.10.bin": {
-                                    "ubuntu-18.04.ext4": {
-                                        "1vcpu_1024mb.json": {
-                                            "Avg": {
-                                                "ping": {
-                                                    "target": 0.0,
-                                                    "delta_percentage": 0
                                                 }
                                             }
                                         }
