@@ -190,7 +190,7 @@ def test_cpu_rdmsr(bin_cloner_path, network_config, cpu_template):
     # - Rootfs: Ubuntu 18.04 with msr-tools package installed
     # - Microvm: 1vCPU with 1024 MB RAM
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="1vcpu_1024mb"))
-    kernel_artifacts = ArtifactSet(artifacts.kernels())
+    kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-5.10"))
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="bionic-msrtools"))
     assert len(disk_artifacts) == 1
 
@@ -226,6 +226,10 @@ def _test_cpu_rdmsr(context):
     ssh_connection.scp_file(
         "../resources/tests/msr/msr_reader.sh", "/bin/msr_reader.sh"
     )
+    _, stdout, stderr = ssh_connection.execute_command("cat /proc/cpuinfo")
+    print(str(stdout.read()))
+    assert 0
+
     _, stdout, stderr = ssh_connection.execute_command("/bin/msr_reader.sh")
     assert stderr.read() == ""
 
