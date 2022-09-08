@@ -3,13 +3,15 @@
 """Tests for the CPU topology emulation feature."""
 
 import platform
+import os
+import shutil
 import re
 import pytest
 import pandas as pd
 
 from conftest import _test_images_s3_bucket
 from framework import utils
-from framework.artifacts import ArtifactCollection, ArtifactSet
+from framework.artifacts import ArtifactCollection, ArtifactSet, NetIfaceConfig
 from framework.matrix import TestMatrix, TestContext
 from framework.builder import MicrovmBuilder
 from framework.defs import SUPPORTED_KERNELS
@@ -151,6 +153,32 @@ def test_brand_string(test_microvm_with_api, network_config):
             expected_guest_brand_string += " @ " + mo.group(0)
 
     assert guest_brand_string == expected_guest_brand_string
+
+
+# Some MSR values should not be checked since they can change at Guest runtime.
+# Current exceptions:
+#   * FS and GS change on task switch and arch_prctl.
+#   * TSC is different for each Guest.
+#   * MSR_{C, L}STAR used for SYSCALL/SYSRET; can be different between guests.
+#   * MSR_IA32_SYSENTER_E{SP, IP} used for SYSENTER/SYSEXIT; same as above.
+#   * MSR_KVM_{WALL, SYSTEM}_CLOCK addresses for struct pvclock_* can be different.
+#
+# More detailed information about MSRs can be found in the Intel® 64 and IA-32
+# Architectures Software Developer’s Manual - Volume 4: Model-Specific Registers
+# Check `arch_gen/src/x86/msr_idex.rs` and `msr-index.h` in upstream Linux
+# for symbolic definitions.
+MSR_EXCEPTION_LIST = [
+    "0x10",        # MSR_IA32_TSC
+    "0x11",        # MSR_KVM_WALL_CLOCK
+    "0x12",        # MSR_KVM_SYSTEM_TIME
+    "0x175",       # MSR_IA32_SYSENTER_ESP
+    "0x176",       # MSR_IA32_SYSENTER_EIP
+    "0x6e0",       # MSR_IA32_TSCDEADLINE
+    "0xc0000082",  # MSR_LSTAR
+    "0xc0000083",  # MSR_CSTAR
+    "0xc0000100",  # MSR_FS_BASE
+    "0xc0000101",  # MSR_GS_BASE
+]
 
 
 @pytest.mark.skipif(
@@ -312,6 +340,279 @@ def _test_cpu_rdmsr(context):
         [microvm_val_df, baseline_val_df], keys=["microvm", "baseline"]
     ).drop_duplicates(keep=False)
     assert val_diff.empty, f"\n {val_diff}"
+
+
+# These names need to be consistent across the two parts of the snapshot-restore test
+# that spans two instances (one that takes a snapshot and one that restores from it).
+SNAPSHOT_RESTORE_SHARED_NAMES = {
+    "snapshot_artifacts_root_dir": "snapshot_artifacts",
+    "rootfs_fname":                "rootfs_rw",
+    "msr_reader_host_fname":       "../resources/tests/msr/msr_reader.sh",
+    "msr_reader_guest_fname":      "/bin/msr_reader.sh",
+    "msrs_before_fname":           "msrs_before.txt",
+    "msrs_after_fname":            "msrs_after.txt",
+    "snapshot_fname":              "vmstate",
+    "mem_fname":                   "mem",
+    # Testing matrix:
+    # - Rootfs: Ubuntu 18.04 with msr-tools package installed
+    # - Microvm: 1vCPU with 1024 MB RAM
+    "disk_keyword":                "bionic-msrtools",
+    "microvm_keyword":             "1vcpu_1024mb",
+}
+
+
+def _check_msr_values_are_equal(before_msrs_fname, after_msrs_fname, guest_kernel_name):
+    before = pd.read_csv(before_msrs_fname)
+    after  = pd.read_csv(after_msrs_fname)
+
+    # pylint: disable=singleton-comparison
+    before_flt = before[before["MSR_ADDR"].isin(MSR_EXCEPTION_LIST) == False]
+    after_flt  = after[after["MSR_ADDR"].isin(MSR_EXCEPTION_LIST) == False]
+    # pylint: enable=singleton-comparison
+    diff = pd.concat([before_flt, after_flt]).drop_duplicates(keep=False)
+
+    assert diff.empty, f"\n{guest_kernel_name}:\n{diff}"
+
+
+def _test_cpu_wrmsr_snapshot(context):
+    shared_names = context.custom["shared_names"]
+    root_disk = context.disk.copy(file_name=shared_names["rootfs_fname"])
+    vm_builder = context.custom["builder"]
+    cpu_template = context.custom["cpu_template"]
+
+    vm_instance = vm_builder.build(
+        kernel=context.kernel,
+        disks=[root_disk],
+        ssh_key=context.disk.ssh_key(),
+        config=context.microvm,
+        cpu_template=cpu_template,
+    )
+
+    vm = vm_instance.vm
+    vm.start()
+
+    # Dump MSR state to a file that will be published to S3 for the 2nd part of the test
+    ssh_connection = net_tools.SSHConnection(vm.ssh_config)
+    ssh_connection.scp_file(
+        shared_names["msr_reader_host_fname"],
+        shared_names["msr_reader_guest_fname"]
+    )
+    _, stdout, stderr = ssh_connection.execute_command(shared_names["msr_reader_guest_fname"])
+    assert stderr.read() == ""
+
+    snapshot_artifacts_dir = os.path.join(
+        shared_names["snapshot_artifacts_root_dir"],
+        context.kernel.base_name()
+    )
+    os.mkdir(snapshot_artifacts_dir)
+
+    msrs_before_fname = os.path.join(snapshot_artifacts_dir, shared_names["msrs_before_fname"])
+    with open(msrs_before_fname, 'w', encoding='UTF-8') as file:
+        file.write(stdout.read())
+
+    # Take a snapshot
+    vm.pause_to_snapshot(
+        mem_file_path=shared_names["mem_fname"],
+        snapshot_path=shared_names["snapshot_fname"],
+        diff=False
+    )
+
+    # Copy snapshot files to be published to S3 for the 2nd part of the test
+    chroot_dir = vm.chroot()
+    shutil.copyfile(
+        os.path.join(chroot_dir, shared_names["mem_fname"]),
+        os.path.join(snapshot_artifacts_dir, shared_names["mem_fname"])
+    )
+    shutil.copyfile(
+        os.path.join(chroot_dir, shared_names["snapshot_fname"]),
+        os.path.join(snapshot_artifacts_dir, shared_names["snapshot_fname"])
+    )
+
+
+@pytest.mark.skipif(
+    PLATFORM != "x86_64", reason="CPU features are masked only on x86_64."
+)
+@pytest.mark.skipif(
+    cpuid_utils.get_cpu_vendor() != cpuid_utils.CpuVendor.INTEL,
+    reason="CPU templates are only available on Intel.",
+)
+@pytest.mark.skipif(
+    utils.get_kernel_version(level=1) not in SUPPORTED_KERNELS,
+    reason=f"Supported kernels are {SUPPORTED_KERNELS}",
+)
+@pytest.mark.parametrize("cpu_template", ["T2S"])
+@pytest.mark.timeout(900)
+@pytest.mark.nonci
+def test_cpu_wrmsr_snapshot(bin_cloner_path, cpu_template):
+    """
+    This is the first part of the test verifying
+    that MSRs retain their values after restoring from a snapshot.
+
+    Before taking a snapshot, MSR values are dumped into a text file.
+    After restoring from the snapshot on another instance, the MSRs are
+    dumped again and their values are compared to previous.
+    Some MSRs are not inherently supposed to retain their values, so they
+    form an MSR exception list.
+
+    This part of the test is responsible for taking a snapshot and publishing
+    its files along with the `before` MSR dump.
+
+    @type: functional
+    """
+
+    shared_names = SNAPSHOT_RESTORE_SHARED_NAMES
+
+    artifacts = ArtifactCollection(_test_images_s3_bucket())
+    microvm_artifacts = ArtifactSet(artifacts.microvms(keyword=shared_names["microvm_keyword"]))
+    kernel_artifacts = ArtifactSet(artifacts.kernels())
+    disk_artifacts = ArtifactSet(artifacts.disks(keyword=shared_names["disk_keyword"]))
+    assert len(disk_artifacts) == 1
+
+    snapshot_artifacts_root_dir = shared_names["snapshot_artifacts_root_dir"]
+    shutil.rmtree(snapshot_artifacts_root_dir, ignore_errors=True)
+    os.mkdir(snapshot_artifacts_root_dir)
+
+    test_context = TestContext()
+    test_context.custom = {
+        "builder": MicrovmBuilder(bin_cloner_path),
+        "cpu_template": cpu_template,
+        "shared_names": shared_names
+    }
+
+    test_matrix = TestMatrix(
+        context=test_context,
+        artifact_sets=[microvm_artifacts, kernel_artifacts, disk_artifacts],
+    )
+    test_matrix.run_test(_test_cpu_wrmsr_snapshot)
+
+
+def _test_cpu_wrmsr_restore(context):
+    shared_names = context.custom["shared_names"]
+    microvm_factory = context.custom['microvm_factory']
+    root_disk = context.disk.copy(file_name=shared_names["rootfs_fname"])
+
+    vm = microvm_factory.build()
+    vm.spawn()
+
+    iface = NetIfaceConfig()
+
+    vm.create_tap_and_ssh_config(
+        host_ip=iface.host_ip,
+        guest_ip=iface.guest_ip,
+        netmask_len=iface.netmask,
+        tapname=iface.tap_name,
+    )
+
+    ssh_arti = context.disk.ssh_key()
+    ssh_arti.download(vm.path)
+    vm.ssh_config["ssh_key_path"] = ssh_arti.local_path()
+    os.chmod(vm.ssh_config["ssh_key_path"], 0o400)
+
+    snapshot_artifacts_dir = os.path.join(
+        shared_names["snapshot_artifacts_root_dir"],
+        context.kernel.base_name()
+    )
+
+    # Bring snapshot files from the 1st part of the test into the jail
+    chroot_dir = vm.chroot()
+    tmp_snapshot_artifacts_dir = os.path.join(chroot_dir, "tmp")
+    os.mkdir(tmp_snapshot_artifacts_dir)
+
+    mem_fname_in_jail = os.path.join(
+        tmp_snapshot_artifacts_dir,
+        shared_names["mem_fname"]
+    )
+    snapshot_fname_in_jail = os.path.join(
+        tmp_snapshot_artifacts_dir,
+        shared_names["snapshot_fname"]
+    )
+
+    shutil.copyfile(
+        os.path.join(snapshot_artifacts_dir, shared_names["mem_fname"]),
+        mem_fname_in_jail
+    )
+    shutil.copyfile(
+        os.path.join(snapshot_artifacts_dir, shared_names["snapshot_fname"]),
+        snapshot_fname_in_jail
+    )
+
+    # Restore from the snapshot
+    vm.restore_from_snapshot(
+        snapshot_mem=mem_fname_in_jail,
+        snapshot_vmstate=snapshot_fname_in_jail,
+        snapshot_disks=[root_disk.local_path()],
+        snapshot_is_diff=False
+    )
+
+    # Dump MSR state to a file for further comparison
+    ssh_connection = net_tools.SSHConnection(vm.ssh_config)
+    ssh_connection.scp_file(
+        shared_names["msr_reader_host_fname"],
+        shared_names["msr_reader_guest_fname"]
+    )
+    _, stdout, stderr = ssh_connection.execute_command(shared_names["msr_reader_guest_fname"])
+    assert stderr.read() == ""
+
+    msrs_after_fname = os.path.join(snapshot_artifacts_dir, shared_names["msrs_after_fname"])
+    with open(msrs_after_fname, 'w', encoding="UTF-8") as file:
+        file.write(stdout.read())
+
+    # Compare the two lists of MSR values and assert they are equal
+    _check_msr_values_are_equal(
+        os.path.join(snapshot_artifacts_dir, shared_names["msrs_before_fname"]),
+        os.path.join(snapshot_artifacts_dir, shared_names["msrs_after_fname"]),
+        context.kernel.base_name() # this is to annotate the assertion output
+    )
+
+
+@pytest.mark.skipif(
+    PLATFORM != "x86_64", reason="CPU features are masked only on x86_64."
+)
+@pytest.mark.skipif(
+    cpuid_utils.get_cpu_vendor() != cpuid_utils.CpuVendor.INTEL,
+    reason="CPU templates are only available on Intel.",
+)
+@pytest.mark.skipif(
+    utils.get_kernel_version(level=1) not in SUPPORTED_KERNELS,
+    reason=f"Supported kernels are {SUPPORTED_KERNELS}",
+)
+@pytest.mark.timeout(900)
+@pytest.mark.nonci
+def test_cpu_wrmsr_restore(microvm_factory):
+    """
+    This is the second part of the test verifying
+    that MSRs retain their values after restoring from a snapshot.
+
+    Before taking a snapshot, MSR values are dumped into a text file.
+    After restoring from the snapshot on another instance, the MSRs are
+    dumped again and their values are compared to previous.
+    Some MSRs are not inherently supposed to retain their values, so they
+    form an MSR exception list.
+
+    This part of the test is responsible for restoring from a snapshot and
+    comparing two sets of MSR values.
+
+    @type: functional
+    """
+
+    shared_names = SNAPSHOT_RESTORE_SHARED_NAMES
+
+    artifacts = ArtifactCollection(_test_images_s3_bucket())
+    microvm_artifacts = ArtifactSet(artifacts.microvms(keyword=shared_names["microvm_keyword"]))
+    kernel_artifacts = ArtifactSet(artifacts.kernels())
+    disk_artifacts = ArtifactSet(artifacts.disks(keyword=shared_names["disk_keyword"]))
+
+    test_context = TestContext()
+    test_context.custom = {
+        "microvm_factory": microvm_factory,
+        "shared_names": shared_names
+    }
+
+    test_matrix = TestMatrix(
+        context=test_context,
+        artifact_sets=[microvm_artifacts, kernel_artifacts, disk_artifacts],
+    )
+    test_matrix.run_test(_test_cpu_wrmsr_restore)
 
 
 @pytest.mark.skipif(
