@@ -385,6 +385,8 @@ def _test_cpu_wrmsr_snapshot(context):
     msrs_before_fname = os.path.join(snapshot_artifacts_dir, shared_names["msrs_before_fname"])
     with open(msrs_before_fname, 'w', encoding='UTF-8') as file:
         file.write(stdout.read())
+    before = pd.read_csv(msrs_before_fname)
+    print(str(before.loc[before["MSR_ADDR"] == "0x10a", "VALUE"]))
 
     # Take a snapshot
     vm.pause_to_snapshot(
@@ -440,7 +442,7 @@ def test_cpu_wrmsr_snapshot(bin_cloner_path, cpu_template):
 
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword=shared_names["microvm_keyword"]))
-    kernel_artifacts = ArtifactSet(artifacts.kernels())
+    kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-4.14"))
     disk_artifacts = ArtifactSet(artifacts.disks(keyword=shared_names["disk_keyword"]))
     assert len(disk_artifacts) == 1
 
@@ -532,6 +534,8 @@ def _test_cpu_wrmsr_restore(context):
     msrs_after_fname = os.path.join(snapshot_artifacts_dir, shared_names["msrs_after_fname"])
     with open(msrs_after_fname, 'w', encoding="UTF-8") as file:
         file.write(stdout.read())
+    after = pd.read_csv(msrs_after_fname)
+    print(str(after.loc[after["MSR_ADDR"] == "0x10a", "VALUE"]))
 
     # Compare the two lists of MSR values and assert they are equal
     _check_msr_values_are_equal(
@@ -575,7 +579,7 @@ def test_cpu_wrmsr_restore(microvm_factory):
 
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword=shared_names["microvm_keyword"]))
-    kernel_artifacts = ArtifactSet(artifacts.kernels())
+    kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-4.14"))
     disk_artifacts = ArtifactSet(artifacts.disks(keyword=shared_names["disk_keyword"]))
 
     test_context = TestContext()
